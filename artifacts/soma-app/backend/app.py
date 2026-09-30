@@ -38,6 +38,7 @@ CORS(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://10.48.151.52:5173",
+         "http://192.168.100.54:5173",
         *EXTRA_CORS_ORIGINS,
     ],
 )
