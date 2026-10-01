@@ -5,11 +5,11 @@ import requests
 import base64
 import os
 import re
-import sqlite3
 import uuid
+import psycopg2
 from datetime import datetime, timedelta
 from werkzeug.security import check_password_hash
-
+load_dotenv()
 from coins import create_coins_blueprint, is_valid_purpose
 import database
 
@@ -21,7 +21,10 @@ load_dotenv()
 
 app = Flask(__name__)
 
-app.secret_key = os.getenv("SOMA_SECRET_KEY", "change-this-secret-key")
+app.secret_key = os.getenv(
+    "SOMA_SECRET_KEY",
+    "change-this-secret-key"
+)
 
 # Extra origins (deployed site, Capacitor app) come from
 # SOMA_CORS_ORIGINS as a comma-separated list.
@@ -38,7 +41,7 @@ CORS(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://10.48.151.52:5173",
-         "http://192.168.100.54:5173",
+        "http://192.168.100.54:5173",
         *EXTRA_CORS_ORIGINS,
     ],
 )
@@ -47,18 +50,17 @@ CORS(
 # DATABASE
 # ============================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.getenv(
-    "SOMA_DB_PATH",
-    os.path.join(BASE_DIR, "soma_hub.db"),
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Add your Neon PostgreSQL "
+            "connection string to the environment."
+        )
+
+    return database.get_connection()
 
 
 # ============================================================
@@ -76,7 +78,10 @@ MPESA_CALLBACK_URL = os.getenv(
     "https://example.com/api/mpesa/callback"
 )
 
-MPESA_ENVIRONMENT = os.getenv("MPESA_ENVIRONMENT", "sandbox").lower()
+MPESA_ENVIRONMENT = os.getenv(
+    "MPESA_ENVIRONMENT",
+    "sandbox"
+).lower()
 
 SOMA_HUB_CODE_PATTERN = re.compile(r"[A-Z0-9-]{3,32}")
 
@@ -89,7 +94,10 @@ else:
     MPESA_BASE_URL = "https://sandbox.safaricom.co.ke"
 
 # Lets local tests point at a stand-in for Safaricom's API.
-MPESA_BASE_URL = os.getenv("MPESA_BASE_URL", MPESA_BASE_URL).rstrip("/")
+MPESA_BASE_URL = os.getenv(
+    "MPESA_BASE_URL",
+    MPESA_BASE_URL
+).rstrip("/")
 
 
 # ============================================================
@@ -111,16 +119,6 @@ def normalize_mpesa_phone(phone):
     """
     Accept common Kenyan M-Pesa phone formats and return:
     2547XXXXXXXX or 2541XXXXXXXX
-
-    Accepted examples:
-        0712345678
-        0112345678
-        254712345678
-        254112345678
-        +254712345678
-        +254112345678
-        712345678
-        112345678
     """
 
     if phone is None:
@@ -128,33 +126,26 @@ def normalize_mpesa_phone(phone):
 
     phone = str(phone).strip()
 
-    # Remove common formatting characters
     phone = phone.replace(" ", "")
     phone = phone.replace("-", "")
     phone = phone.replace("(", "")
     phone = phone.replace(")", "")
 
-    # +254XXXXXXXXX
     if phone.startswith("+254"):
         phone = phone[1:]
 
-    # 07XXXXXXXX
     elif phone.startswith("07"):
         phone = "254" + phone[1:]
 
-    # 01XXXXXXXX
     elif phone.startswith("01"):
         phone = "254" + phone[1:]
 
-    # 7XXXXXXXX
     elif phone.startswith("7"):
         phone = "254" + phone
 
-    # 1XXXXXXXX
     elif phone.startswith("1"):
         phone = "254" + phone
 
-    # Must now be exactly 12 digits
     if len(phone) != 12:
         return None
 
@@ -164,7 +155,6 @@ def normalize_mpesa_phone(phone):
     if not phone.startswith("254"):
         return None
 
-    # Kenyan mobile numbers normally begin 7 or 1 after 254
     if phone[3] not in ("7", "1"):
         return None
 
@@ -190,7 +180,7 @@ def calculate_wallet_balance(conn, soma_hub_code):
             0
         ) AS balance
         FROM wallet_transactions
-        WHERE soma_hub_code = ?
+        WHERE soma_hub_code = %s
         """,
         (soma_hub_code,),
     ).fetchone()
@@ -262,9 +252,6 @@ def register_student():
             "message": "Grade is required"
         }), 400
 
-    # The app creates its own SOMA HUB code and syncs it here
-    # repeatedly, so keep that code and update the existing
-    # student. Only generate one when the client sends none.
     soma_hub_code = str(
         data.get("soma_hub_code", "")
     ).strip().upper()
@@ -283,6 +270,8 @@ def register_student():
     conn = get_db()
 
     try:
+        timestamp = now_string()
+
         conn.execute(
             """
             INSERT INTO students (
@@ -293,41 +282,45 @@ def register_student():
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT(soma_hub_code) DO UPDATE SET
-                name = excluded.name,
-                school_name = excluded.school_name,
-                grade = excluded.grade,
-                updated_at = excluded.updated_at
+                name = EXCLUDED.name,
+                school_name = EXCLUDED.school_name,
+                grade = EXCLUDED.grade,
+                updated_at = EXCLUDED.updated_at
             """,
             (
                 soma_hub_code,
                 name,
                 school_name,
                 grade,
-                now_string(),
-                now_string(),
+                timestamp,
+                timestamp,
             ),
         )
 
         conn.commit()
 
-        student_id = conn.execute(
-            "SELECT id FROM students WHERE soma_hub_code = ?",
+        student = conn.execute(
+            """
+            SELECT id
+            FROM students
+            WHERE soma_hub_code = %s
+            """,
             (soma_hub_code,),
-        ).fetchone()["id"]
+        ).fetchone()
 
         return jsonify({
             "success": True,
             "message": "Student registered successfully",
-            "student_id": student_id,
+            "student_id": student["id"],
             "soma_hub_code": soma_hub_code,
             "name": name,
             "school_name": school_name,
             "grade": grade,
         })
 
-    except sqlite3.IntegrityError as e:
+    except psycopg2.IntegrityError as e:
         conn.rollback()
 
         return jsonify({
@@ -346,7 +339,10 @@ def register_student():
 
 @app.route("/api/students/performance", methods=["GET"])
 def student_performance():
-    soma_hub_code = request.args.get("soma_hub_code", "").strip()
+    soma_hub_code = request.args.get(
+        "soma_hub_code",
+        ""
+    ).strip()
 
     if not soma_hub_code:
         return jsonify({
@@ -368,7 +364,7 @@ def student_performance():
                 created_at,
                 updated_at
             FROM students
-            WHERE soma_hub_code = ?
+            WHERE soma_hub_code = %s
             """,
             (soma_hub_code,),
         ).fetchone()
@@ -382,9 +378,9 @@ def student_performance():
         points = conn.execute(
             """
             SELECT
-                COALESCE(SUM(points), 0) AS total_points
+                COALESCE(SUM(total_points), 0) AS total_points
             FROM term_points
-            WHERE student_id = ?
+            WHERE student_id = %s
             """,
             (student["id"],),
         ).fetchone()
@@ -423,7 +419,7 @@ def admin_login():
             """
             SELECT id, username, password_hash
             FROM admins
-            WHERE username = ?
+            WHERE username = %s
             """,
             (username,),
         ).fetchone()
@@ -434,7 +430,10 @@ def admin_login():
                 "message": "Invalid username or password"
             }), 401
 
-        if not check_password_hash(admin["password_hash"], password):
+        if not check_password_hash(
+            admin["password_hash"],
+            password
+        ):
             return jsonify({
                 "success": False,
                 "message": "Invalid username or password"
@@ -507,7 +506,7 @@ def admin_student_lookup(soma_hub_code):
                 created_at,
                 updated_at
             FROM students
-            WHERE soma_hub_code = ?
+            WHERE soma_hub_code = %s
             """,
             (soma_hub_code,),
         ).fetchone()
@@ -520,9 +519,9 @@ def admin_student_lookup(soma_hub_code):
 
         total_points = conn.execute(
             """
-            SELECT COALESCE(SUM(points), 0) AS total_points
+            SELECT COALESCE(SUM(total_points), 0) AS total_points
             FROM term_points
-            WHERE student_id = ?
+            WHERE student_id = %s
             """,
             (student["id"],),
         ).fetchone()["total_points"]
@@ -566,7 +565,7 @@ def admin_top_students():
                 s.name,
                 s.school_name,
                 s.grade,
-                COALESCE(SUM(tp.points), 0) AS total_points
+                COALESCE(SUM(tp.total_points), 0) AS total_points
             FROM students s
             LEFT JOIN term_points tp
                 ON tp.student_id = s.id
@@ -623,8 +622,14 @@ def get_mpesa_access_token():
         timeout=30
     )
 
-    print("M-PESA TOKEN STATUS:", response.status_code)
-    print("M-PESA TOKEN RESPONSE:", response.text)
+    print(
+        "M-PESA TOKEN STATUS:",
+        response.status_code
+    )
+    print(
+        "M-PESA TOKEN RESPONSE:",
+        response.text
+    )
 
     if response.status_code != 200:
         raise Exception(
@@ -655,7 +660,10 @@ def mpesa_token():
         })
 
     except Exception as e:
-        print("M-PESA TOKEN ERROR:", str(e))
+        print(
+            "M-PESA TOKEN ERROR:",
+            str(e)
+        )
 
         return jsonify({
             "success": False,
@@ -693,9 +701,6 @@ def create_payment_session():
 
     phone_number = data.get("phone_number")
     amount = data.get("amount")
-
-    # What to do once the money arrives: "subscribe",
-    # "unlock:<material_id>", or nothing for a plain top-up.
     purpose = data.get("purpose")
 
     if not is_valid_purpose(purpose):
@@ -704,23 +709,12 @@ def create_payment_session():
             "message": "Invalid payment purpose"
         }), 400
 
-    # --------------------------------------------------------
-    # Validate SOMA HUB code
-    # --------------------------------------------------------
-
     if not soma_hub_code:
         return jsonify({
             "success": False,
             "message": "SOMA HUB code is required"
         }), 400
 
-    # --------------------------------------------------------
-    # Validate amount
-    # --------------------------------------------------------
-
-    # M-Pesa only charges whole shillings. Accepting 10.5 here
-    # would send 10 to Safaricom and the callback amount check
-    # would then reject the payment.
     try:
         amount = float(amount)
     except (TypeError, ValueError):
@@ -737,20 +731,22 @@ def create_payment_session():
 
     amount = int(amount)
 
-    if amount < MIN_TOPUP_AMOUNT or amount > MAX_TOPUP_AMOUNT:
+    if (
+        amount < MIN_TOPUP_AMOUNT
+        or amount > MAX_TOPUP_AMOUNT
+    ):
         return jsonify({
             "success": False,
             "message": (
-                f"Amount must be between KSh {MIN_TOPUP_AMOUNT} "
-                f"and KSh {MAX_TOPUP_AMOUNT:,}"
+                f"Amount must be between KSh "
+                f"{MIN_TOPUP_AMOUNT} and "
+                f"KSh {MAX_TOPUP_AMOUNT:,}"
             )
         }), 400
 
-    # --------------------------------------------------------
-    # Validate phone
-    # --------------------------------------------------------
-
-    normalized_phone = normalize_mpesa_phone(phone_number)
+    normalized_phone = normalize_mpesa_phone(
+        phone_number
+    )
 
     print("============================================")
     print("PAYMENT SESSION REQUEST")
@@ -769,10 +765,6 @@ def create_payment_session():
     conn = get_db()
 
     try:
-        # ----------------------------------------------------
-        # Find student
-        # ----------------------------------------------------
-
         student = conn.execute(
             """
             SELECT
@@ -782,7 +774,7 @@ def create_payment_session():
                 school_name,
                 grade
             FROM students
-            WHERE soma_hub_code = ?
+            WHERE soma_hub_code = %s
             """,
             (soma_hub_code,),
         ).fetchone()
@@ -793,18 +785,16 @@ def create_payment_session():
                 "message": "Student not found"
             }), 404
 
-        # ----------------------------------------------------
-        # Create internal payment session
-        # ----------------------------------------------------
-
         session_id = (
             "SOMA-"
             + uuid.uuid4().hex[:32].upper()
         )
 
         created_at = now_string()
+
         expires_at = (
-            datetime.now() + timedelta(minutes=15)
+            datetime.now()
+            + timedelta(minutes=15)
         ).strftime("%Y-%m-%d %H:%M:%S")
 
         conn.execute(
@@ -819,7 +809,7 @@ def create_payment_session():
                 expires_at,
                 purpose
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 session_id,
@@ -835,22 +825,25 @@ def create_payment_session():
 
         conn.commit()
 
-        # ----------------------------------------------------
-        # Get M-Pesa token
-        # ----------------------------------------------------
-
         try:
             access_token = get_mpesa_access_token()
+
         except Exception as e:
-            print("TOKEN ERROR DURING STK PUSH:", str(e))
+            print(
+                "TOKEN ERROR DURING STK PUSH:",
+                str(e)
+            )
 
             conn.execute(
                 """
                 UPDATE payment_sessions
-                SET status = ?
-                WHERE session_id = ?
+                SET status = %s
+                WHERE session_id = %s
                 """,
-                ("failed", session_id),
+                (
+                    "failed",
+                    session_id
+                ),
             )
 
             conn.commit()
@@ -861,19 +854,13 @@ def create_payment_session():
                 "error": str(e),
             }), 500
 
-        # ----------------------------------------------------
-        # Timestamp
-        # ----------------------------------------------------
-
         timestamp = datetime.now().strftime(
             "%Y%m%d%H%M%S"
         )
 
-        password = generate_mpesa_password(timestamp)
-
-        # ----------------------------------------------------
-        # STK Push request
-        # ----------------------------------------------------
+        password = generate_mpesa_password(
+            timestamp
+        )
 
         stk_url = (
             MPESA_BASE_URL
@@ -916,8 +903,14 @@ def create_payment_session():
             timeout=30,
         )
 
-        print("STK RESPONSE STATUS:", response.status_code)
-        print("STK RESPONSE:", response.text)
+        print(
+            "STK RESPONSE STATUS:",
+            response.status_code
+        )
+        print(
+            "STK RESPONSE:",
+            response.text
+        )
 
         try:
             result = response.json()
@@ -930,20 +923,24 @@ def create_payment_session():
             result.get("ResponseCode", "")
         )
 
-        if response.status_code != 200 or response_code != "0":
+        if (
+            response.status_code != 200
+            or response_code != "0"
+        ):
             conn.execute(
                 """
                 UPDATE payment_sessions
-                SET status = ?
-                WHERE session_id = ?
+                SET status = %s
+                WHERE session_id = %s
                 """,
-                ("failed", session_id),
+                (
+                    "failed",
+                    session_id
+                ),
             )
 
             conn.commit()
 
-            # Safaricom explains rejections in errorMessage (e.g. a
-            # request already waiting on the phone); pass it on.
             mpesa_message = (
                 result.get("errorMessage")
                 or result.get("ResponseDescription")
@@ -953,17 +950,14 @@ def create_payment_session():
             return jsonify({
                 "success": False,
                 "message": (
-                    f"M-Pesa couldn't send the request: {mpesa_message}"
+                    f"M-Pesa couldn't send the request: "
+                    f"{mpesa_message}"
                     if mpesa_message
                     else "M-Pesa STK Push could not be sent"
                 ),
                 "mpesa_response": result,
                 "session_id": session_id,
             }), 502
-
-        # ----------------------------------------------------
-        # Save M-Pesa request IDs
-        # ----------------------------------------------------
 
         checkout_request_id = result.get(
             "CheckoutRequestID"
@@ -977,9 +971,9 @@ def create_payment_session():
             """
             UPDATE payment_sessions
             SET
-                checkout_request_id = ?,
-                merchant_request_id = ?
-            WHERE session_id = ?
+                checkout_request_id = %s,
+                merchant_request_id = %s
+            WHERE session_id = %s
             """,
             (
                 checkout_request_id,
@@ -990,9 +984,18 @@ def create_payment_session():
 
         conn.commit()
 
-        print("PAYMENT SESSION CREATED:", session_id)
-        print("CHECKOUT REQUEST ID:", checkout_request_id)
-        print("MERCHANT REQUEST ID:", merchant_request_id)
+        print(
+            "PAYMENT SESSION CREATED:",
+            session_id
+        )
+        print(
+            "CHECKOUT REQUEST ID:",
+            checkout_request_id
+        )
+        print(
+            "MERCHANT REQUEST ID:",
+            merchant_request_id
+        )
 
         return jsonify({
             "success": True,
@@ -1007,7 +1010,10 @@ def create_payment_session():
     except Exception as e:
         conn.rollback()
 
-        print("PAYMENT SESSION ERROR:", str(e))
+        print(
+            "PAYMENT SESSION ERROR:",
+            str(e)
+        )
 
         return jsonify({
             "success": False,
@@ -1037,7 +1043,9 @@ def mpesa_callback():
     print(callback_data)
 
     if not callback_data:
-        print("CALLBACK ERROR: No JSON body received")
+        print(
+            "CALLBACK ERROR: No JSON body received"
+        )
         print("============================================================")
 
         return jsonify({
@@ -1046,15 +1054,28 @@ def mpesa_callback():
         }), 400
 
     try:
-        body = callback_data.get("Body", {})
-        stk_callback = body.get("stkCallback", {})
+        body = callback_data.get(
+            "Body",
+            {}
+        )
+
+        stk_callback = body.get(
+            "stkCallback",
+            {}
+        )
 
         merchant_request_id = str(
-            stk_callback.get("MerchantRequestID", "")
+            stk_callback.get(
+                "MerchantRequestID",
+                ""
+            )
         ).strip()
 
         checkout_request_id = str(
-            stk_callback.get("CheckoutRequestID", "")
+            stk_callback.get(
+                "CheckoutRequestID",
+                ""
+            )
         ).strip()
 
         result_code = safe_int(
@@ -1063,30 +1084,46 @@ def mpesa_callback():
         )
 
         result_desc = str(
-            stk_callback.get("ResultDesc", "")
+            stk_callback.get(
+                "ResultDesc",
+                ""
+            )
         )
 
-        print("MerchantRequestID:", merchant_request_id)
-        print("CheckoutRequestID:", checkout_request_id)
-        print("ResultCode:", result_code)
-        print("ResultDesc:", result_desc)
+        print(
+            "MerchantRequestID:",
+            merchant_request_id
+        )
+        print(
+            "CheckoutRequestID:",
+            checkout_request_id
+        )
+        print(
+            "ResultCode:",
+            result_code
+        )
+        print(
+            "ResultDesc:",
+            result_desc
+        )
 
-        if not checkout_request_id and not merchant_request_id:
+        if (
+            not checkout_request_id
+            and not merchant_request_id
+        ):
             print(
                 "CALLBACK ERROR: Neither CheckoutRequestID "
                 "nor MerchantRequestID was received"
             )
 
-            print("============================================================")
+            print(
+                "============================================================"
+            )
 
             return jsonify({
                 "ResultCode": 0,
                 "ResultDesc": "Accepted"
             })
-
-        # ----------------------------------------------------
-        # Extract callback metadata
-        # ----------------------------------------------------
 
         callback_metadata = {}
 
@@ -1095,56 +1132,63 @@ def mpesa_callback():
             {}
         )
 
-        items = metadata.get("Item", [])
+        items = metadata.get(
+            "Item",
+            []
+        )
 
         for item in items:
             name = item.get("Name")
 
             if name:
-                callback_metadata[name] = item.get("Value")
+                callback_metadata[name] = item.get(
+                    "Value"
+                )
 
         print("CALLBACK METADATA:")
         print(callback_metadata)
 
-        mpesa_amount = callback_metadata.get("Amount")
+        mpesa_amount = callback_metadata.get(
+            "Amount"
+        )
+
         mpesa_receipt = callback_metadata.get(
             "MpesaReceiptNumber"
         )
+
         transaction_date = callback_metadata.get(
             "TransactionDate"
         )
+
         mpesa_phone = callback_metadata.get(
             "PhoneNumber"
         )
-
-        # ----------------------------------------------------
-        # Database
-        # ----------------------------------------------------
 
         conn = get_db()
 
         try:
             payment_session = None
 
-            # First try CheckoutRequestID
             if checkout_request_id:
                 payment_session = conn.execute(
                     """
                     SELECT *
                     FROM payment_sessions
-                    WHERE checkout_request_id = ?
+                    WHERE checkout_request_id = %s
                     LIMIT 1
                     """,
                     (checkout_request_id,),
                 ).fetchone()
 
-            # Fallback to MerchantRequestID
-            if not payment_session and merchant_request_id:
+            if (
+                not payment_session
+                and merchant_request_id
+            ):
                 payment_session = conn.execute(
                     """
                     SELECT *
                     FROM payment_sessions
-                    WHERE merchant_request_id = ?
+                    WHERE merchant_request_id = %s
                     LIMIT 1
                     """,
                     (merchant_request_id,),
@@ -1154,19 +1198,7 @@ def mpesa_callback():
                 print(
                     "WARNING: PAYMENT SESSION NOT FOUND"
                 )
-                print(
-                    "CheckoutRequestID:",
-                    checkout_request_id
-                )
-                print(
-                    "MerchantRequestID:",
-                    merchant_request_id
-                )
 
-                print("============================================================")
-
-                # We acknowledge the callback so the request
-                # itself is not treated as malformed.
                 return jsonify({
                     "ResultCode": 0,
                     "ResultDesc": "Accepted"
@@ -1175,29 +1207,26 @@ def mpesa_callback():
             print("PAYMENT SESSION FOUND:")
             print(dict(payment_session))
 
-            session_id = payment_session["session_id"]
+            session_id = payment_session[
+                "session_id"
+            ]
+
             expected_amount = float(
                 payment_session["amount"]
             )
 
-            # ------------------------------------------------
-            # Handle failed/cancelled STK
-            # ------------------------------------------------
-
             if result_code != 0:
-
-                print("M-PESA PAYMENT FAILED/CANCELLED")
-                print("Session:", session_id)
-                print("ResultCode:", result_code)
-                print("ResultDesc:", result_desc)
+                print(
+                    "M-PESA PAYMENT FAILED/CANCELLED"
+                )
 
                 conn.execute(
                     """
                     UPDATE payment_sessions
                     SET
-                        status = ?,
-                        completed_at = ?
-                    WHERE session_id = ?
+                        status = %s,
+                        completed_at = %s
+                    WHERE session_id = %s
                     """,
                     (
                         "failed",
@@ -1208,17 +1237,10 @@ def mpesa_callback():
 
                 conn.commit()
 
-                print("PAYMENT SESSION MARKED FAILED")
-                print("============================================================")
-
                 return jsonify({
                     "ResultCode": 0,
                     "ResultDesc": "Accepted"
                 })
-
-            # ------------------------------------------------
-            # Successful callback validation
-            # ------------------------------------------------
 
             if result_code == 0:
 
@@ -1228,7 +1250,6 @@ def mpesa_callback():
                         "has no Amount"
                     )
 
-                    # Keep pending so it can be investigated.
                     conn.rollback()
 
                     return jsonify({
@@ -1237,7 +1258,10 @@ def mpesa_callback():
                     })
 
                 try:
-                    paid_amount = float(mpesa_amount)
+                    paid_amount = float(
+                        mpesa_amount
+                    )
+
                 except (TypeError, ValueError):
                     print(
                         "CALLBACK ERROR: Invalid callback amount:",
@@ -1251,12 +1275,15 @@ def mpesa_callback():
                         "ResultDesc": "Accepted"
                     })
 
-                print("EXPECTED AMOUNT:", expected_amount)
-                print("M-PESA AMOUNT:", paid_amount)
+                print(
+                    "EXPECTED AMOUNT:",
+                    expected_amount
+                )
 
-                # ------------------------------------------------
-                # Amount must match payment session
-                # ------------------------------------------------
+                print(
+                    "M-PESA AMOUNT:",
+                    paid_amount
+                )
 
                 if paid_amount != expected_amount:
 
@@ -1269,9 +1296,9 @@ def mpesa_callback():
                         """
                         UPDATE payment_sessions
                         SET
-                            status = ?,
-                            completed_at = ?
-                        WHERE session_id = ?
+                            status = %s,
+                            completed_at = %s
+                        WHERE session_id = %s
                         """,
                         (
                             "failed",
@@ -1287,10 +1314,6 @@ def mpesa_callback():
                         "ResultDesc": "Accepted"
                     })
 
-                # ------------------------------------------------
-                # Receipt is required for successful credit
-                # ------------------------------------------------
-
                 if not mpesa_receipt:
                     print(
                         "CALLBACK ERROR: No M-Pesa receipt number"
@@ -1303,15 +1326,11 @@ def mpesa_callback():
                         "ResultDesc": "Accepted"
                     })
 
-                # ------------------------------------------------
-                # Check for duplicate transaction
-                # ------------------------------------------------
-
                 existing_transaction = conn.execute(
                     """
                     SELECT *
                     FROM mpesa_transactions
-                    WHERE transaction_id = ?
+                    WHERE transaction_id = %s
                     LIMIT 1
                     """,
                     (str(mpesa_receipt),),
@@ -1319,25 +1338,21 @@ def mpesa_callback():
 
                 if existing_transaction:
 
-                    print(
-                        "DUPLICATE M-PESA TRANSACTION:",
-                        mpesa_receipt
-                    )
-
-                    # If it belongs to this payment session,
-                    # make sure the session is completed.
                     if (
-                        existing_transaction["payment_session_id"]
-                        == payment_session["session_id"]
+                        existing_transaction[
+                            "payment_session_id"
+                        ]
+                        == payment_session[
+                            "session_id"
+                        ]
                     ):
-
                         conn.execute(
                             """
                             UPDATE payment_sessions
                             SET
-                                status = ?,
-                                completed_at = ?
-                            WHERE session_id = ?
+                                status = %s,
+                                completed_at = %s
+                            WHERE session_id = %s
                             """,
                             (
                                 "completed",
@@ -1348,30 +1363,10 @@ def mpesa_callback():
 
                         conn.commit()
 
-                        print(
-                            "EXISTING TRANSACTION BELONGS "
-                            "TO THIS SESSION."
-                        )
-
-                    else:
-
-                        print(
-                            "WARNING: RECEIPT ALREADY BELONGS "
-                            "TO ANOTHER PAYMENT SESSION."
-                        )
-
-                    print(
-                        "============================================================"
-                    )
-
                     return jsonify({
                         "ResultCode": 0,
                         "ResultDesc": "Accepted"
                     })
-
-                # ------------------------------------------------
-                # Optional transaction date formatting
-                # ------------------------------------------------
 
                 formatted_transaction_time = None
 
@@ -1382,20 +1377,21 @@ def mpesa_callback():
 
                     try:
                         if len(transaction_date) == 14:
-                            formatted_transaction_time = datetime.strptime(
-                                transaction_date,
-                                "%Y%m%d%H%M%S"
-                            ).strftime(
-                                "%Y-%m-%d %H:%M:%S"
+                            formatted_transaction_time = (
+                                datetime.strptime(
+                                    transaction_date,
+                                    "%Y%m%d%H%M%S"
+                                ).strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
                             )
+
                     except Exception:
                         formatted_transaction_time = None
 
-                # ------------------------------------------------
-                # Insert M-Pesa transaction
-                # ------------------------------------------------
-
-                print("INSERTING M-PESA TRANSACTION...")
+                print(
+                    "INSERTING M-PESA TRANSACTION..."
+                )
 
                 conn.execute(
                     """
@@ -1414,7 +1410,10 @@ def mpesa_callback():
                         status,
                         created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s
+                    )
                     """,
                     (
                         str(mpesa_receipt),
@@ -1427,19 +1426,23 @@ def mpesa_callback():
                         str(mpesa_phone)
                         if mpesa_phone
                         else None,
-                        callback_metadata.get("FirstName"),
-                        callback_metadata.get("MiddleName"),
-                        callback_metadata.get("LastName"),
+                        callback_metadata.get(
+                            "FirstName"
+                        ),
+                        callback_metadata.get(
+                            "MiddleName"
+                        ),
+                        callback_metadata.get(
+                            "LastName"
+                        ),
                         "completed",
                         now_string(),
                     ),
                 )
 
-                # ------------------------------------------------
-                # Credit wallet
-                # ------------------------------------------------
-
-                print("CREDITING SOMA HUB WALLET...")
+                print(
+                    "CREDITING SOMA HUB WALLET..."
+                )
 
                 conn.execute(
                     """
@@ -1452,7 +1455,9 @@ def mpesa_callback():
                         description,
                         created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s
+                    )
                     """,
                     (
                         payment_session["student_id"],
@@ -1465,17 +1470,13 @@ def mpesa_callback():
                     ),
                 )
 
-                # ------------------------------------------------
-                # Complete payment session
-                # ------------------------------------------------
-
                 conn.execute(
                     """
                     UPDATE payment_sessions
                     SET
-                        status = ?,
-                        completed_at = ?
-                    WHERE session_id = ?
+                        status = %s,
+                        completed_at = %s
+                    WHERE session_id = %s
                     """,
                     (
                         "completed",
@@ -1484,52 +1485,60 @@ def mpesa_callback():
                     ),
                 )
 
-                # ------------------------------------------------
-                # ATOMIC COMMIT
-                # ------------------------------------------------
-
                 conn.commit()
 
-                # Calculate balance AFTER commit
                 wallet_balance = calculate_wallet_balance(
                     conn,
-                    payment_session["soma_hub_code"]
+                    payment_session[
+                        "soma_hub_code"
+                    ]
                 )
 
-                print("------------------------------------------------------------")
-                print("M-PESA PAYMENT COMPLETED SUCCESSFULLY")
-                print("Session:", session_id)
+                print(
+                    "M-PESA PAYMENT COMPLETED SUCCESSFULLY"
+                )
+                print(
+                    "Session:",
+                    session_id
+                )
                 print(
                     "SOMA HUB CODE:",
-                    payment_session["soma_hub_code"]
+                    payment_session[
+                        "soma_hub_code"
+                    ]
                 )
-                print("Amount credited:", paid_amount)
-                print("M-Pesa receipt:", mpesa_receipt)
-                print("Wallet balance:", wallet_balance)
-                print("------------------------------------------------------------")
-                print("============================================================")
+                print(
+                    "Amount credited:",
+                    paid_amount
+                )
+                print(
+                    "M-Pesa receipt:",
+                    mpesa_receipt
+                )
+                print(
+                    "Wallet balance:",
+                    wallet_balance
+                )
 
-                # Separate transaction: the credit above stands
-                # even if this fails.
-                coins_bp.fulfil_payment_purpose(session_id)
+                coins_bp.fulfil_payment_purpose(
+                    session_id
+                )
 
                 return jsonify({
                     "ResultCode": 0,
                     "ResultDesc": "Accepted"
                 })
 
-        except sqlite3.IntegrityError as e:
+        except psycopg2.IntegrityError as e:
             conn.rollback()
 
             print(
                 "DATABASE INTEGRITY ERROR WHILE PROCESSING "
                 "M-PESA CALLBACK:"
             )
-            print(str(e))
-            print("============================================================")
 
-            # Keep the payment pending rather than falsely
-            # claiming it was successfully credited.
+            print(str(e))
+
             return jsonify({
                 "ResultCode": 1,
                 "ResultDesc": "Database processing error"
@@ -1542,12 +1551,11 @@ def mpesa_callback():
                 "CRITICAL ERROR WHILE PROCESSING "
                 "M-PESA CALLBACK:"
             )
+
             print(str(e))
 
             import traceback
             traceback.print_exc()
-
-            print("============================================================")
 
             return jsonify({
                 "ResultCode": 1,
@@ -1559,13 +1567,14 @@ def mpesa_callback():
 
     except Exception as e:
 
-        print("CRITICAL CALLBACK PARSING ERROR:")
+        print(
+            "CRITICAL CALLBACK PARSING ERROR:"
+        )
+
         print(str(e))
 
         import traceback
         traceback.print_exc()
-
-        print("============================================================")
 
         return jsonify({
             "ResultCode": 1,
@@ -1577,7 +1586,10 @@ def mpesa_callback():
 # PAYMENT STATUS
 # ============================================================
 
-@app.route("/api/mpesa/payment-status/<session_id>", methods=["GET"])
+@app.route(
+    "/api/mpesa/payment-status/<session_id>",
+    methods=["GET"]
+)
 def payment_status(session_id):
 
     session_id = session_id.strip()
@@ -1590,7 +1602,7 @@ def payment_status(session_id):
             """
             SELECT *
             FROM payment_sessions
-            WHERE session_id = ?
+            WHERE session_id = %s
             LIMIT 1
             """,
             (session_id,),
@@ -1606,12 +1618,6 @@ def payment_status(session_id):
             "soma_hub_code"
         ]
 
-        # ----------------------------------------------------
-        # Safety repair:
-        # If the wallet transaction exists but the session
-        # was somehow left pending, mark it completed.
-        # ----------------------------------------------------
-
         wallet_transaction = conn.execute(
             """
             SELECT *
@@ -1619,7 +1625,7 @@ def payment_status(session_id):
             WHERE reference IN (
                 SELECT transaction_id
                 FROM mpesa_transactions
-                WHERE payment_session_id = ?
+                WHERE payment_session_id = %s
             )
             LIMIT 1
             """,
@@ -1635,9 +1641,9 @@ def payment_status(session_id):
                 """
                 UPDATE payment_sessions
                 SET
-                    status = ?,
-                    completed_at = ?
-                WHERE session_id = ?
+                    status = %s,
+                    completed_at = %s
+                WHERE session_id = %s
                 """,
                 (
                     "completed",
@@ -1652,17 +1658,11 @@ def payment_status(session_id):
                 """
                 SELECT *
                 FROM payment_sessions
-                WHERE session_id = ?
+                WHERE session_id = %s
                 LIMIT 1
                 """,
                 (session_id,),
             ).fetchone()
-
-        # ----------------------------------------------------
-        # Expire sessions the customer never completed.
-        # A late successful callback still credits the wallet,
-        # because the callback looks sessions up by request ID.
-        # ----------------------------------------------------
 
         if (
             payment_session["status"] == "pending"
@@ -1673,10 +1673,13 @@ def payment_status(session_id):
             conn.execute(
                 """
                 UPDATE payment_sessions
-                SET status = ?
-                WHERE session_id = ?
+                SET status = %s
+                WHERE session_id = %s
                 """,
-                ("expired", session_id),
+                (
+                    "expired",
+                    session_id
+                ),
             )
 
             conn.commit()
@@ -1685,26 +1688,27 @@ def payment_status(session_id):
                 """
                 SELECT *
                 FROM payment_sessions
-                WHERE session_id = ?
+                WHERE session_id = %s
                 LIMIT 1
                 """,
                 (session_id,),
             ).fetchone()
 
-        # Retry the purpose if the callback credited the wallet
-        # but didn't get to finish it.
         if (
             payment_session["status"] == "completed"
             and payment_session["purpose"]
             and not payment_session["purpose_result"]
         ):
-            coins_bp.fulfil_payment_purpose(session_id)
+
+            coins_bp.fulfil_payment_purpose(
+                session_id
+            )
 
             payment_session = conn.execute(
                 """
                 SELECT *
                 FROM payment_sessions
-                WHERE session_id = ?
+                WHERE session_id = %s
                 LIMIT 1
                 """,
                 (session_id,),
@@ -1726,7 +1730,7 @@ def payment_status(session_id):
                 status,
                 created_at
             FROM mpesa_transactions
-            WHERE payment_session_id = ?
+            WHERE payment_session_id = %s
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -1735,21 +1739,39 @@ def payment_status(session_id):
 
         return jsonify({
             "success": True,
-            "session_id": payment_session["session_id"],
-            "soma_hub_code": payment_session["soma_hub_code"],
-            "amount": payment_session["amount"],
-            "status": payment_session["status"],
+            "session_id": payment_session[
+                "session_id"
+            ],
+            "soma_hub_code": payment_session[
+                "soma_hub_code"
+            ],
+            "amount": payment_session[
+                "amount"
+            ],
+            "status": payment_session[
+                "status"
+            ],
             "checkout_request_id": payment_session[
                 "checkout_request_id"
             ],
             "merchant_request_id": payment_session[
                 "merchant_request_id"
             ],
-            "created_at": payment_session["created_at"],
-            "expires_at": payment_session["expires_at"],
-            "purpose": payment_session["purpose"],
-            "purpose_result": payment_session["purpose_result"],
-            "completed_at": payment_session["completed_at"],
+            "created_at": payment_session[
+                "created_at"
+            ],
+            "expires_at": payment_session[
+                "expires_at"
+            ],
+            "purpose": payment_session[
+                "purpose"
+            ],
+            "purpose_result": payment_session[
+                "purpose_result"
+            ],
+            "completed_at": payment_session[
+                "completed_at"
+            ],
             "wallet_balance": wallet_balance,
             "transaction": (
                 dict(transaction)
@@ -1766,7 +1788,10 @@ def payment_status(session_id):
 # WALLET
 # ============================================================
 
-@app.route("/api/wallet/<soma_hub_code>", methods=["GET"])
+@app.route(
+    "/api/wallet/<soma_hub_code>",
+    methods=["GET"]
+)
 def get_wallet(soma_hub_code):
 
     soma_hub_code = soma_hub_code.strip()
@@ -1781,7 +1806,7 @@ def get_wallet(soma_hub_code):
                 soma_hub_code,
                 name
             FROM students
-            WHERE soma_hub_code = ?
+            WHERE soma_hub_code = %s
             """,
             (soma_hub_code,),
         ).fetchone()
@@ -1807,7 +1832,7 @@ def get_wallet(soma_hub_code):
                 description,
                 created_at
             FROM wallet_transactions
-            WHERE soma_hub_code = ?
+            WHERE soma_hub_code = %s
             ORDER BY id DESC
             LIMIT 50
             """,
@@ -1832,14 +1857,19 @@ def get_wallet(soma_hub_code):
 # DEVELOPMENT TEST PAYMENT
 # ============================================================
 
-@app.route("/api/dev/test-payment/<session_id>", methods=["POST"])
+@app.route(
+    "/api/dev/test-payment/<session_id>",
+    methods=["POST"]
+)
 def dev_test_payment(session_id):
 
-    # Never allow this in production
     if MPESA_ENVIRONMENT != "sandbox":
         return jsonify({
             "success": False,
-            "message": "Development test payment is disabled in production"
+            "message": (
+                "Development test payment is disabled "
+                "in production"
+            )
         }), 403
 
     session_id = session_id.strip()
@@ -1852,7 +1882,7 @@ def dev_test_payment(session_id):
             """
             SELECT *
             FROM payment_sessions
-            WHERE session_id = ?
+            WHERE session_id = %s
             LIMIT 1
             """,
             (session_id,),
@@ -1865,14 +1895,19 @@ def dev_test_payment(session_id):
             }), 404
 
         if payment_session["status"] == "completed":
+
             balance = calculate_wallet_balance(
                 conn,
-                payment_session["soma_hub_code"]
+                payment_session[
+                    "soma_hub_code"
+                ]
             )
 
             return jsonify({
                 "success": True,
-                "message": "Payment session is already completed",
+                "message": (
+                    "Payment session is already completed"
+                ),
                 "session_id": session_id,
                 "wallet_balance": balance,
             })
@@ -1886,7 +1921,6 @@ def dev_test_payment(session_id):
             payment_session["amount"]
         )
 
-        # Insert test M-Pesa transaction
         conn.execute(
             """
             INSERT INTO mpesa_transactions (
@@ -1904,7 +1938,10 @@ def dev_test_payment(session_id):
                 status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s
+            )
             """,
             (
                 fake_receipt,
@@ -1923,7 +1960,6 @@ def dev_test_payment(session_id):
             ),
         )
 
-        # Credit wallet
         conn.execute(
             """
             INSERT INTO wallet_transactions (
@@ -1935,7 +1971,7 @@ def dev_test_payment(session_id):
                 description,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 payment_session["student_id"],
@@ -1948,14 +1984,13 @@ def dev_test_payment(session_id):
             ),
         )
 
-        # Complete session
         conn.execute(
             """
             UPDATE payment_sessions
             SET
-                status = ?,
-                completed_at = ?
-            WHERE session_id = ?
+                status = %s,
+                completed_at = %s
+            WHERE session_id = %s
             """,
             (
                 "completed",
@@ -1968,35 +2003,61 @@ def dev_test_payment(session_id):
 
         balance = calculate_wallet_balance(
             conn,
-            payment_session["soma_hub_code"]
+            payment_session[
+                "soma_hub_code"
+            ]
         )
 
-        print("============================================")
-        print("DEVELOPMENT TEST PAYMENT COMPLETED")
-        print("Session:", session_id)
-        print("Amount:", amount)
-        print("Receipt:", fake_receipt)
-        print("Wallet balance:", balance)
-        print("============================================")
+        print(
+            "============================================"
+        )
+        print(
+            "DEVELOPMENT TEST PAYMENT COMPLETED"
+        )
+        print(
+            "Session:",
+            session_id
+        )
+        print(
+            "Amount:",
+            amount
+        )
+        print(
+            "Receipt:",
+            fake_receipt
+        )
+        print(
+            "Wallet balance:",
+            balance
+        )
+        print(
+            "============================================"
+        )
 
-        purpose_result = coins_bp.fulfil_payment_purpose(session_id)
+        purpose_result = coins_bp.fulfil_payment_purpose(
+            session_id
+        )
 
         return jsonify({
             "purpose_result": purpose_result,
             "success": True,
-            "message": "Development test payment completed",
+            "message": (
+                "Development test payment completed"
+            ),
             "session_id": session_id,
             "amount": amount,
             "reference": fake_receipt,
             "wallet_balance": balance,
         })
 
-    except sqlite3.IntegrityError as e:
+    except psycopg2.IntegrityError as e:
         conn.rollback()
 
         return jsonify({
             "success": False,
-            "message": "Could not process development payment",
+            "message": (
+                "Could not process development payment"
+            ),
             "error": str(e),
         }), 500
 
@@ -2005,7 +2066,9 @@ def dev_test_payment(session_id):
 
         return jsonify({
             "success": False,
-            "message": "Could not process development payment",
+            "message": (
+                "Could not process development payment"
+            ),
             "error": str(e),
         }), 500
 
@@ -2017,7 +2080,10 @@ def dev_test_payment(session_id):
 # LEGACY STK PUSH ROUTE
 # ============================================================
 
-@app.route("/api/mpesa/stk-push", methods=["POST"])
+@app.route(
+    "/api/mpesa/stk-push",
+    methods=["POST"]
+)
 def legacy_stk_push():
 
     data = request.get_json(silent=True) or {}
@@ -2036,7 +2102,9 @@ def legacy_stk_push():
     if not normalized_phone:
         return jsonify({
             "success": False,
-            "message": "A valid M-Pesa phone number is required"
+            "message": (
+                "A valid M-Pesa phone number is required"
+            )
         }), 400
 
     try:
@@ -2109,17 +2177,16 @@ def legacy_stk_push():
 
     except Exception as e:
 
-        print("LEGACY STK PUSH ERROR:", str(e))
+        print(
+            "LEGACY STK PUSH ERROR:",
+            str(e)
+        )
 
         return jsonify({
             "success": False,
             "message": str(e)
         }), 500
 
-
-# ============================================================
-# RUN FLASK
-# ============================================================
 
 # ============================================================
 # COINS AND UNLOCKS
@@ -2135,19 +2202,37 @@ coins_bp = create_coins_blueprint(
 app.register_blueprint(coins_bp)
 
 
-if __name__ == "__main__":
-    # Creates any tables added since this database was made.
-    database.DATABASE_PATH = DB_PATH
+# ============================================================
+# INITIALIZE DATABASE
+# ============================================================
+
+try:
     database.init_database()
+    print("SOMA HUB PostgreSQL database initialized successfully.")
+except Exception as database_error:
+    print(
+        "SOMA HUB DATABASE INITIALIZATION ERROR:",
+        database_error
+    )
+
+
+# ============================================================
+# RUN FLASK
+# ============================================================
+
+if __name__ == "__main__":
 
     print("")
     print("============================================================")
     print("                 SOMA HUB BACKEND")
     print("============================================================")
-    print("Database:", DB_PATH)
+    print("Database: Neon PostgreSQL")
     print("M-Pesa environment:", MPESA_ENVIRONMENT)
     print("M-Pesa shortcode:", MPESA_SHORTCODE)
-    print("M-Pesa callback configured:", bool(MPESA_CALLBACK_URL))
+    print(
+        "M-Pesa callback configured:",
+        bool(MPESA_CALLBACK_URL)
+    )
     print("============================================================")
     print("Flask running at http://127.0.0.1:5000")
     print("============================================================")
@@ -2155,8 +2240,7 @@ if __name__ == "__main__":
 
     app.run(
         host="127.0.0.1",
-        port=5000,   
+        port=5000,
         debug=False,
         use_reloader=False
-
     )

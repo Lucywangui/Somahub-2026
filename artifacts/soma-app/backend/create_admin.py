@@ -1,9 +1,12 @@
-import sqlite3
-from werkzeug.security import generate_password_hash
 from datetime import datetime
 
+import psycopg2
+from dotenv import load_dotenv
+from werkzeug.security import generate_password_hash
 
-DATABASE = "soma_hub.db"
+load_dotenv()
+
+import database
 
 
 username = input("Enter developer username: ").strip()
@@ -14,25 +17,37 @@ if not username or not password:
     raise SystemExit
 
 
-connection = sqlite3.connect(DATABASE)
-
 try:
-    password_hash = generate_password_hash(password)
+    # Make sure the Neon database tables exist.
+    database.init_database()
 
-    connection.execute(
-        """
-        INSERT INTO admins (username, password_hash, created_at)
-        VALUES (?, ?, ?)
-        """,
-        (username, password_hash, datetime.now().isoformat())
-    )
+    connection = database.get_connection()
 
-    connection.commit()
+    try:
+        password_hash = generate_password_hash(password)
 
-    print("Developer account created successfully.")
+        connection.execute(
+            """
+            INSERT INTO admins (username, password_hash, created_at)
+            VALUES (%s, %s, %s)
+            """,
+            (
+                username,
+                password_hash,
+                datetime.now().isoformat(),
+            )
+        )
 
-except sqlite3.IntegrityError:
-    print("That username already exists.")
+        connection.commit()
 
-finally:
-    connection.close()
+        print("Developer account created successfully.")
+
+    except psycopg2.IntegrityError:
+        connection.rollback()
+        print("That username already exists.")
+
+    finally:
+        connection.close()
+
+except Exception as exc:
+    print("Unable to create developer account:", exc)
