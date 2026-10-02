@@ -4,10 +4,10 @@ import {
   useSomaStore,
 } from "@/lib/storage";
 
-
 /* =========================================================
-   M-PESA WALLET TOP-UP
+   INTASEND WALLET TOP-UP
    Talks to the Flask backend, which owns the KSh wallet.
+   IntaSend handles the actual payment collection.
    ========================================================= */
 
 export const MIN_TOPUP_AMOUNT = 1;
@@ -20,8 +20,8 @@ export type PaymentStatus =
   | "expired";
 
 /**
- * What the server does once the money arrives. Without one, the
- * payment just tops up the wallet.
+ * What the server does once the payment is confirmed.
+ * Without one, the payment simply tops up the wallet.
  */
 export type PaymentPurpose = "subscribe" | `unlock:${string}`;
 
@@ -47,7 +47,7 @@ function currentStudent() {
   };
 }
 
-/** Returns true for a whole number of shillings M-Pesa will accept. */
+/** Returns true for a whole-number KSh amount accepted by the wallet. */
 export function isValidTopUpAmount(amount: number): boolean {
   return (
     Number.isInteger(amount) &&
@@ -57,32 +57,43 @@ export function isValidTopUpAmount(amount: number): boolean {
 }
 
 /**
- * Sends an STK Push to the phone. If the backend doesn't know
- * this student yet (signup sync failed), registers them and
- * retries once.
+ * Starts an IntaSend payment session.
+ *
+ * The Flask backend creates the IntaSend payment request.
+ * The frontend never handles the IntaSend secret key.
+ *
+ * If the backend doesn't know this student yet, the student is
+ * registered and the request is retried once.
  */
 export async function startTopUp(
   phoneNumber: string,
   amount: number,
   purpose?: PaymentPurpose
-): Promise<{ sessionId: string }> {
+): Promise<{
+  sessionId: string;
+  paymentUrl?: string | null;
+}> {
   const send = () =>
-    request<{ session_id: string }>(
-      "/api/mpesa/payment-session",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          soma_hub_code: currentStudent().soma_hub_code,
-          phone_number: phoneNumber,
-          amount,
-          purpose,
-        }),
-      }
-    );
+    request<{
+      session_id: string;
+      payment_url?: string | null;
+    }>("/api/intasend/payment-session", {
+      method: "POST",
+      body: JSON.stringify({
+        soma_hub_code: currentStudent().soma_hub_code,
+        phone_number: phoneNumber,
+        amount,
+        purpose,
+      }),
+    });
 
   try {
     const result = await send();
-    return { sessionId: result.session_id };
+
+    return {
+      sessionId: result.session_id,
+      paymentUrl: result.payment_url ?? null,
+    };
   } catch (error) {
     if (
       !(error instanceof ApiError) ||
@@ -94,10 +105,20 @@ export async function startTopUp(
     await syncStudentToBackend(currentStudent());
 
     const result = await send();
-    return { sessionId: result.session_id };
+
+    return {
+      sessionId: result.session_id,
+      paymentUrl: result.payment_url ?? null,
+    };
   }
 }
 
+/**
+ * Checks the payment session.
+ *
+ * The backend is the source of truth for whether the payment
+ * has actually been confirmed and whether the wallet was credited.
+ */
 export async function getPaymentStatus(
   sessionId: string
 ): Promise<{
@@ -110,7 +131,7 @@ export async function getPaymentStatus(
     wallet_balance: number;
     purpose_result?: string | null;
   }>(
-    `/api/mpesa/payment-status/${encodeURIComponent(sessionId)}`
+    `/api/intasend/payment-status/${encodeURIComponent(sessionId)}`
   );
 
   return {
@@ -120,13 +141,20 @@ export async function getPaymentStatus(
   };
 }
 
-/** Sandbox only: completes a pending session without a phone. */
+/**
+ * Development/sandbox only.
+ *
+ * This endpoint allows a pending test payment to be completed
+ * without waiting for an actual payment.
+ */
 export async function simulateTestPayment(
   sessionId: string
 ): Promise<void> {
   await request(
     `/api/dev/test-payment/${encodeURIComponent(sessionId)}`,
-    { method: "POST" }
+    {
+      method: "POST",
+    }
   );
 }
 
@@ -134,9 +162,16 @@ const sleep = (ms: number) =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Polls until the payment settles, the timeout passes, or the
- * signal aborts. Network errors while polling are retried,
- * since the customer may still be entering their PIN.
+ * Polls the IntaSend payment session until:
+ *
+ * - payment is completed
+ * - payment fails
+ * - payment expires
+ * - timeout is reached
+ * - request is aborted
+ *
+ * Network errors while polling are ignored temporarily because
+ * the payment may still be processing on the server.
  */
 export async function pollPaymentStatus(
   sessionId: string,
@@ -182,12 +217,16 @@ export async function pollPaymentStatus(
         result.status === "failed" ||
         result.status === "expired"
       ) {
-        return { status: result.status };
+        return {
+          status: result.status,
+        };
       }
     } catch {
-      // Keep polling; a later check may succeed.
+      // Keep polling. A later check may succeed.
     }
   }
 
-  return { status: "timeout" };
+  return {
+    status: "timeout",
+  };
 }

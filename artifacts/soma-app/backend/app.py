@@ -1,7 +1,6 @@
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
@@ -92,10 +91,6 @@ def utc_now():
 
 
 def now_string():
-    """
-    Return the timestamp format expected by the existing
-    PostgreSQL tables used by coins.py.
-    """
     return datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -104,17 +99,17 @@ def now_string():
 def get_db():
     """
     Compatibility wrapper used by coins.py.
-
-    coins.py expects get_db() to return a PostgreSQL
-    connection that can be used directly with conn.execute().
     """
-
     return database.get_connection()
 
 
 def is_sandbox():
     return INTASEND_TEST_ENVIRONMENT
 
+
+# ============================================================
+# WALLET BALANCE
+# ============================================================
 
 def calculate_wallet_balance(
     conn_or_code,
@@ -123,21 +118,15 @@ def calculate_wallet_balance(
     """
     Calculate the student's paid SOMA Points balance.
 
-    This function supports BOTH forms:
+    Supports:
 
         calculate_wallet_balance(code)
 
     and:
 
         calculate_wallet_balance(conn, code)
-
-    The second form is required by coins.py so that wallet
-    calculations can happen inside the same database connection.
     """
 
-    # --------------------------------------------------------
-    # Called as calculate_wallet_balance(code)
-    # --------------------------------------------------------
     if soma_hub_code is None:
         code = str(
             conn_or_code
@@ -152,9 +141,9 @@ def calculate_wallet_balance(
                             SUM(
                                 CASE
                                     WHEN transaction_type = 'CREDIT'
-                                    THEN amount
+                                        THEN amount
                                     WHEN transaction_type = 'DEBIT'
-                                    THEN -amount
+                                        THEN -amount
                                     ELSE 0
                                 END
                             ),
@@ -176,10 +165,8 @@ def calculate_wallet_balance(
             int(row["balance"] or 0)
         )
 
-    # --------------------------------------------------------
-    # Called as calculate_wallet_balance(conn, code)
-    # --------------------------------------------------------
     conn = conn_or_code
+
     code = str(
         soma_hub_code
     ).strip().upper()
@@ -194,9 +181,9 @@ def calculate_wallet_balance(
                     SUM(
                         CASE
                             WHEN transaction_type = 'CREDIT'
-                            THEN amount
+                                THEN amount
                             WHEN transaction_type = 'DEBIT'
-                            THEN -amount
+                                THEN -amount
                             ELSE 0
                         END
                     ),
@@ -223,17 +210,16 @@ def calculate_wallet_balance(
 
 
 # ============================================================
-# PAYMENT HELPERS
+# PHONE / INTASEND HELPERS
 # ============================================================
 
 def normalize_phone(phone):
     """
     Normalize common Kenyan phone formats.
 
-    Examples:
-        0712345678 -> 254712345678
-        712345678 -> 254712345678
-        +254712345678 -> 254712345678
+    0712345678 -> 254712345678
+    712345678  -> 254712345678
+    +254712345678 -> 254712345678
     """
 
     if phone is None:
@@ -342,13 +328,43 @@ def extract_intasend_invoice(response):
     return response
 
 
+# ============================================================
+# STUDENT LOOKUP
+# ============================================================
+
+def get_student_by_code(soma_hub_code):
+    code = str(
+        soma_hub_code
+    ).strip().upper()
+
+    with database.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM students
+                WHERE soma_hub_code = %s
+                LIMIT 1
+                """,
+                (code,),
+            )
+
+            return cur.fetchone()
+
+
+# ============================================================
+# PAYMENT COMPLETION
+# ============================================================
+
 def process_completed_payment(
     payment_session_id,
     invoice_id=None,
 ):
     """
-    Credit the student's wallet exactly once after IntaSend
-    confirms the payment as COMPLETE.
+    Credit the student's paid SOMA Points wallet exactly once.
+
+    payment_session_id is the INTEGER primary-key ID from
+    payment_sessions.
     """
 
     with database.get_connection() as conn:
@@ -372,7 +388,9 @@ def process_completed_payment(
                     "message": "Payment session not found."
                 }
 
-            if payment_session["status"] == "completed":
+            if str(
+                payment_session["status"]
+            ).lower() == "completed":
                 return {
                     "success": True,
                     "already_processed": True,
@@ -383,6 +401,10 @@ def process_completed_payment(
                 payment_session["amount"]
             )
 
+            student_id = int(
+                payment_session["student_id"]
+            )
+
             soma_hub_code = (
                 payment_session["soma_hub_code"]
             )
@@ -390,9 +412,10 @@ def process_completed_payment(
             reference = (
                 payment_session["checkout_request_id"]
                 or invoice_id
-                or payment_session["id"]
+                or payment_session["session_id"]
             )
 
+            # Prevent duplicate wallet credits.
             cur.execute(
                 """
                 SELECT id
@@ -425,26 +448,32 @@ def process_completed_payment(
                     "message": "Payment was already credited."
                 }
 
+            # ------------------------------------------------
+            # Add exactly KSh amount as SOMA Points.
+            # ------------------------------------------------
             cur.execute(
                 """
                 INSERT INTO wallet_transactions (
+                    student_id,
                     soma_hub_code,
-                    transaction_type,
                     amount,
+                    transaction_type,
                     reference,
                     description,
                     created_at
                 )
                 VALUES (
                     %s,
-                    'CREDIT',
                     %s,
+                    %s,
+                    'CREDIT',
                     %s,
                     %s,
                     CURRENT_TIMESTAMP
                 )
                 """,
                 (
+                    student_id,
                     soma_hub_code,
                     amount,
                     reference,
@@ -471,6 +500,10 @@ def process_completed_payment(
         "message": "Wallet credited successfully."
     }
 
+
+# ============================================================
+# INTASEND STATUS SYNC
+# ============================================================
 
 def sync_payment_from_intasend(
     payment_session
@@ -583,28 +616,6 @@ def sync_payment_from_intasend(
         }
 
 
-def get_student_by_code(
-    soma_hub_code
-):
-    code = str(
-        soma_hub_code
-    ).strip().upper()
-
-    with database.get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM students
-                WHERE soma_hub_code = %s
-                LIMIT 1
-                """,
-                (code,),
-            )
-
-            return cur.fetchone()
-
-
 # ============================================================
 # BASIC ROUTES
 # ============================================================
@@ -664,7 +675,7 @@ def register_student():
             "soma_hub_code",
             ""
         )
-    ).strip()
+    ).strip().upper()
 
     name = str(
         data.get(
@@ -695,12 +706,18 @@ def register_student():
             )
         }), 400
 
+    if not name:
+        return jsonify({
+            "success": False,
+            "message": "Student name is required."
+        }), 400
+
     with database.get_connection() as conn:
         with conn.cursor() as cur:
 
             cur.execute(
                 """
-                SELECT *
+                SELECT id
                 FROM students
                 WHERE soma_hub_code = %s
                 LIMIT 1
@@ -726,7 +743,8 @@ def register_student():
                         school = COALESCE(
                             NULLIF(%s, ''),
                             school
-                        )
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE soma_hub_code = %s
                     """,
                     (
@@ -736,6 +754,7 @@ def register_student():
                         soma_hub_code,
                     ),
                 )
+
             else:
                 cur.execute(
                     """
@@ -743,13 +762,17 @@ def register_student():
                         soma_hub_code,
                         name,
                         grade,
-                        school
+                        school,
+                        created_at,
+                        updated_at
                     )
                     VALUES (
                         %s,
                         %s,
                         %s,
-                        %s
+                        %s,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
                     )
                     """,
                     (
@@ -775,49 +798,15 @@ def register_student():
 # STUDENT PERFORMANCE
 # ============================================================
 
-@app.route(
-    "/api/students/performance",
-    methods=["GET", "POST"]
-)
-def student_performance():
+@app.post("/api/students/performance")
+def save_student_performance():
+    """
+    Save the exact structure sent by storage.ts:
 
-    if request.method == "GET":
-        soma_hub_code = (
-            request.args.get(
-                "soma_hub_code"
-            )
-            or request.args.get(
-                "code"
-            )
-        )
-
-        if not soma_hub_code:
-            return jsonify({
-                "success": False,
-                "message": (
-                    "SOMA HUB code is required."
-                )
-            }), 400
-
-        with database.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM student_performance
-                    WHERE soma_hub_code = %s
-                    ORDER BY term
-                    """,
-                    (soma_hub_code,),
-                )
-
-                rows = cur.fetchall()
-
-        return jsonify({
-            "success": True,
-            "soma_hub_code": soma_hub_code,
-            "performance": rows
-        })
+        soma_hub_code
+        term_points[]
+        quiz_results[]
+    """
 
     data = request.get_json(
         silent=True
@@ -828,131 +817,456 @@ def student_performance():
             "soma_hub_code",
             ""
         )
-    ).strip()
+    ).strip().upper()
 
-    term = str(
-        data.get(
-            "term",
-            ""
-        )
-    ).strip()
+    term_points = data.get(
+        "term_points"
+    ) or []
 
-    if not soma_hub_code or not term:
+    quiz_results = data.get(
+        "quiz_results"
+    ) or []
+
+    if not soma_hub_code:
         return jsonify({
             "success": False,
             "message": (
-                "SOMA HUB code and term are required."
+                "SOMA HUB code is required."
             )
         }), 400
 
-    study_notes = int(
-        data.get(
-            "studyNotes",
-            0
-        ) or 0
+    student = get_student_by_code(
+        soma_hub_code
     )
 
-    topical_quizzes = int(
-        data.get(
-            "topicalQuizzes",
-            0
-        ) or 0
-    )
+    if not student:
+        return jsonify({
+            "success": False,
+            "message": "Student account not found."
+        }), 404
 
-    exams = int(
-        data.get(
-            "exams",
-            0
-        ) or 0
-    )
+    if not isinstance(term_points, list):
+        return jsonify({
+            "success": False,
+            "message": "term_points must be a list."
+        }), 400
 
-    consistency = int(
-        data.get(
-            "consistency",
-            0
-        ) or 0
-    )
+    if not isinstance(quiz_results, list):
+        return jsonify({
+            "success": False,
+            "message": "quiz_results must be a list."
+        }), 400
 
-    progress = int(
-        data.get(
-            "progress",
-            0
-        ) or 0
-    )
+    student_id = student["id"]
 
-    total = min(
-        100,
-        study_notes
-        + topical_quizzes
-        + exams
-        + consistency
-        + progress
-    )
+    terms_synced = 0
+    quiz_results_synced = 0
 
     with database.get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO student_performance (
-                    soma_hub_code,
-                    term,
-                    study_notes,
-                    topical_quizzes,
-                    exams,
-                    consistency,
-                    progress,
-                    total_points
+
+            # ------------------------------------------------
+            # TERM POINTS
+            # ------------------------------------------------
+            for item in term_points:
+
+                if not isinstance(item, dict):
+                    continue
+
+                term_key = str(
+                    item.get(
+                        "term_key",
+                        ""
+                    )
+                ).strip()
+
+                if not term_key:
+                    continue
+
+                study_notes = max(
+                    0,
+                    min(
+                        20,
+                        int(
+                            item.get(
+                                "study_notes_points",
+                                0
+                            ) or 0
+                        )
+                    )
                 )
-                VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s
+
+                topical_quizzes = max(
+                    0,
+                    min(
+                        25,
+                        int(
+                            item.get(
+                                "topical_quiz_points",
+                                0
+                            ) or 0
+                        )
+                    )
                 )
-                ON CONFLICT (
-                    soma_hub_code,
-                    term
+
+                exams = max(
+                    0,
+                    min(
+                        25,
+                        int(
+                            item.get(
+                                "exam_points",
+                                0
+                            ) or 0
+                        )
+                    )
                 )
-                DO UPDATE SET
-                    study_notes =
-                        EXCLUDED.study_notes,
-                    topical_quizzes =
-                        EXCLUDED.topical_quizzes,
-                    exams =
-                        EXCLUDED.exams,
-                    consistency =
-                        EXCLUDED.consistency,
-                    progress =
-                        EXCLUDED.progress,
-                    total_points =
-                        EXCLUDED.total_points
-                """,
-                (
-                    soma_hub_code,
-                    term,
-                    study_notes,
-                    topical_quizzes,
-                    exams,
-                    consistency,
-                    progress,
-                    total,
-                ),
-            )
+
+                consistency = max(
+                    0,
+                    min(
+                        15,
+                        int(
+                            item.get(
+                                "consistency_points",
+                                0
+                            ) or 0
+                        )
+                    )
+                )
+
+                improvement = max(
+                    0,
+                    min(
+                        15,
+                        int(
+                            item.get(
+                                "improvement_points",
+                                0
+                            ) or 0
+                        )
+                    )
+                )
+
+                total = min(
+                    100,
+                    study_notes
+                    + topical_quizzes
+                    + exams
+                    + consistency
+                    + improvement
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO term_points (
+                        student_id,
+                        term_key,
+                        study_notes_points,
+                        topical_quiz_points,
+                        exam_points,
+                        consistency_points,
+                        improvement_points,
+                        total_points
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    ON CONFLICT (
+                        student_id,
+                        term_key
+                    )
+                    DO UPDATE SET
+                        study_notes_points =
+                            EXCLUDED.study_notes_points,
+                        topical_quiz_points =
+                            EXCLUDED.topical_quiz_points,
+                        exam_points =
+                            EXCLUDED.exam_points,
+                        consistency_points =
+                            EXCLUDED.consistency_points,
+                        improvement_points =
+                            EXCLUDED.improvement_points,
+                        total_points =
+                            EXCLUDED.total_points
+                    """,
+                    (
+                        student_id,
+                        term_key,
+                        study_notes,
+                        topical_quizzes,
+                        exams,
+                        consistency,
+                        improvement,
+                        total,
+                    ),
+                )
+
+                terms_synced += 1
+
+            # ------------------------------------------------
+            # QUIZ RESULTS
+            # ------------------------------------------------
+            for item in quiz_results:
+
+                if not isinstance(item, dict):
+                    continue
+
+                material_id = (
+                    item.get("material_id")
+                )
+
+                material_title = str(
+                    item.get(
+                        "material_title",
+                        ""
+                    )
+                ).strip()
+
+                subject = str(
+                    item.get(
+                        "subject",
+                        ""
+                    )
+                ).strip()
+
+                grade_key = str(
+                    item.get(
+                        "grade_key",
+                        ""
+                    )
+                ).strip()
+
+                quiz_type = str(
+                    item.get(
+                        "quiz_type",
+                        "topical"
+                    )
+                ).strip()
+
+                completed_at = str(
+                    item.get(
+                        "completed_at",
+                        ""
+                    )
+                ).strip()
+
+                if not completed_at:
+                    completed_at = now_string()
+
+                try:
+                    score = int(
+                        item.get(
+                            "score",
+                            0
+                        ) or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    score = 0
+
+                try:
+                    total = int(
+                        item.get(
+                            "total",
+                            0
+                        ) or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    total = 0
+
+                try:
+                    percentage = float(
+                        item.get(
+                            "percentage",
+                            0
+                        ) or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    percentage = 0.0
+
+                # Prevent duplicate records when the same
+                # performance data is synced repeatedly.
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM quiz_results
+                    WHERE student_id = %s
+                      AND (
+                          material_id = %s
+                          OR (
+                              material_id IS NULL
+                              AND %s IS NULL
+                          )
+                      )
+                      AND quiz_type = %s
+                      AND completed_at = %s
+                    LIMIT 1
+                    """,
+                    (
+                        student_id,
+                        material_id,
+                        material_id,
+                        quiz_type,
+                        completed_at,
+                    ),
+                )
+
+                existing_result = cur.fetchone()
+
+                if existing_result:
+                    continue
+
+                cur.execute(
+                    """
+                    INSERT INTO quiz_results (
+                        student_id,
+                        material_id,
+                        material_title,
+                        subject,
+                        grade_key,
+                        quiz_type,
+                        score,
+                        total,
+                        percentage,
+                        completed_at
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    """,
+                    (
+                        student_id,
+                        material_id,
+                        material_title,
+                        subject,
+                        grade_key,
+                        quiz_type,
+                        score,
+                        total,
+                        percentage,
+                        completed_at,
+                    ),
+                )
+
+                quiz_results_synced += 1
 
             conn.commit()
 
     return jsonify({
         "success": True,
         "message": (
-            "Performance synced successfully."
+            "Student performance synced successfully."
         ),
         "soma_hub_code": soma_hub_code,
-        "term": term,
-        "total_points": total
+        "terms_synced": terms_synced,
+        "quiz_results_synced": quiz_results_synced
+    })
+
+
+@app.get("/api/students/performance")
+def get_student_performance():
+    soma_hub_code = (
+        request.args.get(
+            "soma_hub_code"
+        )
+        or request.args.get(
+            "code"
+        )
+    )
+
+    if not soma_hub_code:
+        return jsonify({
+            "success": False,
+            "message": (
+                "SOMA HUB code is required."
+            )
+        }), 400
+
+    soma_hub_code = str(
+        soma_hub_code
+    ).strip().upper()
+
+    with database.get_connection() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    term_key,
+                    study_notes_points,
+                    topical_quiz_points,
+                    exam_points,
+                    consistency_points,
+                    improvement_points,
+                    total_points
+                FROM term_points
+                WHERE student_id = (
+                    SELECT id
+                    FROM students
+                    WHERE soma_hub_code = %s
+                )
+                ORDER BY term_key
+                """,
+                (soma_hub_code,),
+            )
+
+            terms = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT
+                    material_id,
+                    material_title,
+                    subject,
+                    grade_key,
+                    quiz_type,
+                    score,
+                    total,
+                    percentage,
+                    completed_at
+                FROM quiz_results
+                WHERE student_id = (
+                    SELECT id
+                    FROM students
+                    WHERE soma_hub_code = %s
+                )
+                ORDER BY completed_at DESC
+                """,
+                (soma_hub_code,),
+            )
+
+            quizzes = cur.fetchall()
+
+    return jsonify({
+        "success": True,
+        "soma_hub_code": soma_hub_code,
+        "term_points": terms,
+        "quiz_results": quizzes
     })
 
 
@@ -993,7 +1307,7 @@ def admin_login():
             cur.execute(
                 """
                 SELECT *
-                FROM admin_users
+                FROM admins
                 WHERE username = %s
                 LIMIT 1
                 """,
@@ -1010,7 +1324,6 @@ def admin_login():
 
     password_hash = (
         admin.get("password_hash")
-        or admin.get("password")
     )
 
     if not password_hash:
@@ -1089,6 +1402,10 @@ def admin_student_lookup(
             )
         }), 401
 
+    soma_hub_code = str(
+        soma_hub_code
+    ).strip().upper()
+
     student = get_student_by_code(
         soma_hub_code
     )
@@ -1101,22 +1418,56 @@ def admin_student_lookup(
 
     with database.get_connection() as conn:
         with conn.cursor() as cur:
+
             cur.execute(
                 """
-                SELECT *
-                FROM student_performance
-                WHERE soma_hub_code = %s
-                ORDER BY term
+                SELECT
+                    term_key,
+                    study_notes_points,
+                    topical_quiz_points,
+                    exam_points,
+                    consistency_points,
+                    improvement_points,
+                    total_points
+                FROM term_points
+                WHERE student_id = %s
+                ORDER BY term_key
                 """,
-                (soma_hub_code,),
+                (
+                    student["id"],
+                ),
             )
 
             performance = cur.fetchall()
 
+            cur.execute(
+                """
+                SELECT
+                    material_id,
+                    material_title,
+                    subject,
+                    grade_key,
+                    quiz_type,
+                    score,
+                    total,
+                    percentage,
+                    completed_at
+                FROM quiz_results
+                WHERE student_id = %s
+                ORDER BY completed_at DESC
+                """,
+                (
+                    student["id"],
+                ),
+            )
+
+            quiz_results = cur.fetchall()
+
     return jsonify({
         "success": True,
         "student": student,
-        "performance": performance
+        "performance": performance,
+        "quiz_results": quiz_results
     })
 
 
@@ -1140,14 +1491,14 @@ def admin_top_students():
                     s.grade,
                     s.school,
                     COALESCE(
-                        SUM(p.total_points),
+                        SUM(tp.total_points),
                         0
                     ) AS total_points
                 FROM students s
-                LEFT JOIN student_performance p
-                    ON p.soma_hub_code =
-                       s.soma_hub_code
+                LEFT JOIN term_points tp
+                    ON tp.student_id = s.id
                 GROUP BY
+                    s.id,
                     s.soma_hub_code,
                     s.name,
                     s.grade,
@@ -1182,7 +1533,7 @@ def create_intasend_payment_session():
             "soma_hub_code",
             ""
         )
-    ).strip()
+    ).strip().upper()
 
     purpose = str(
         data.get(
@@ -1221,9 +1572,13 @@ def create_intasend_payment_session():
             )
         }), 400
 
-    if not is_valid_purpose(
-        purpose
-    ) and purpose != "topup":
+    # Top-up is the primary current payment purpose.
+    # Legacy unlock/subscription purposes remain supported
+    # internally by coins.py for compatibility.
+    if (
+        purpose != "topup"
+        and not is_valid_purpose(purpose)
+    ):
         return jsonify({
             "success": False,
             "message": (
@@ -1269,8 +1624,17 @@ def create_intasend_payment_session():
             )
         }), 404
 
+    # Public session identifier returned to frontend.
     session_id = secrets.token_urlsafe(
         24
+    )
+
+    # Payment sessions expire after 30 minutes.
+    expires_at = (
+        datetime.utcnow()
+        + timedelta(minutes=30)
+    ).strftime(
+        "%Y-%m-%d %H:%M:%S"
     )
 
     with database.get_connection() as conn:
@@ -1278,13 +1642,15 @@ def create_intasend_payment_session():
             cur.execute(
                 """
                 INSERT INTO payment_sessions (
-                    id,
+                    session_id,
+                    student_id,
                     soma_hub_code,
                     amount,
                     purpose,
                     phone_number,
                     status,
-                    created_at
+                    created_at,
+                    expires_at
                 )
                 VALUES (
                     %s,
@@ -1292,20 +1658,29 @@ def create_intasend_payment_session():
                     %s,
                     %s,
                     %s,
+                    %s,
                     'pending',
-                    CURRENT_TIMESTAMP
+                    CURRENT_TIMESTAMP,
+                    %s
                 )
+                RETURNING id
                 """,
                 (
                     session_id,
+                    student["id"],
                     soma_hub_code,
                     amount,
                     purpose,
                     phone_number,
+                    expires_at,
                 ),
             )
 
+            payment_row = cur.fetchone()
+
             conn.commit()
+
+    payment_db_id = payment_row["id"]
 
     try:
         service = get_intasend_service()
@@ -1362,7 +1737,7 @@ def create_intasend_payment_session():
                     (
                         invoice_id,
                         api_ref,
-                        session_id,
+                        payment_db_id,
                     ),
                 )
 
@@ -1394,7 +1769,7 @@ def create_intasend_payment_session():
                     SET status = 'failed'
                     WHERE id = %s
                     """,
-                    (session_id,),
+                    (payment_db_id,),
                 )
 
                 conn.commit()
@@ -1495,16 +1870,17 @@ def intasend_webhook():
         })
 
     if state == "COMPLETE":
+
         result = process_completed_payment(
             payment_session["id"],
             invoice_id=invoice_id,
         )
 
+        # Preserve existing purpose fulfilment support.
         try:
             coins_bp.fulfil_payment_purpose(
                 payment_session["id"]
             )
-
         except Exception:
             app.logger.exception(
                 "Unable to fulfil payment purpose."
@@ -1567,7 +1943,7 @@ def intasend_payment_status(
                 """
                 SELECT *
                 FROM payment_sessions
-                WHERE id = %s
+                WHERE session_id = %s
                 LIMIT 1
                 """,
                 (session_id,),
@@ -1588,6 +1964,7 @@ def intasend_payment_status(
     ).lower()
 
     if status == "pending":
+
         created_at = (
             payment_session.get(
                 "created_at"
@@ -1595,6 +1972,7 @@ def intasend_payment_status(
         )
 
         if created_at:
+
             if created_at.tzinfo is None:
                 created_at = (
                     created_at.replace(
@@ -1614,7 +1992,9 @@ def intasend_payment_status(
                             SET status = 'expired'
                             WHERE id = %s
                             """,
-                            (session_id,),
+                            (
+                                payment_session["id"],
+                            ),
                         )
 
                         conn.commit()
@@ -1622,15 +2002,18 @@ def intasend_payment_status(
                 status = "expired"
 
         if status == "pending":
+
             result = (
                 sync_payment_from_intasend(
                     payment_session
                 )
             )
 
-            state = result.get(
-                "state",
-                "PENDING"
+            state = str(
+                result.get(
+                    "state",
+                    "PENDING"
+                )
             ).lower()
 
             if state == "complete":
@@ -1638,7 +2021,7 @@ def intasend_payment_status(
 
                 try:
                     coins_bp.fulfil_payment_purpose(
-                        session_id
+                        payment_session["id"]
                     )
                 except Exception:
                     app.logger.exception(
@@ -1648,6 +2031,7 @@ def intasend_payment_status(
 
             elif state == "failed":
                 status = "failed"
+
             else:
                 status = state
 
@@ -1671,7 +2055,7 @@ def intasend_payment_status(
                 SELECT *
                 FROM wallet_transactions
                 WHERE soma_hub_code = %s
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
                 (
@@ -1714,6 +2098,10 @@ def intasend_payment_status(
 def wallet_balance(
     soma_hub_code
 ):
+    soma_hub_code = str(
+        soma_hub_code
+    ).strip().upper()
+
     student = get_student_by_code(
         soma_hub_code
     )
@@ -1750,9 +2138,9 @@ def dev_test_payment(
     """
     Sandbox-only helper.
 
-    This does NOT connect to any real payment provider.
-    It is only available when IntaSend is configured for
-    sandbox/test mode.
+    This does not connect to real payment processing.
+    It simply completes an existing sandbox payment session
+    so the wallet-credit flow can be tested.
     """
 
     if not INTASEND_TEST_ENVIRONMENT:
@@ -1770,7 +2158,7 @@ def dev_test_payment(
                 """
                 SELECT *
                 FROM payment_sessions
-                WHERE id = %s
+                WHERE session_id = %s
                 LIMIT 1
                 """,
                 (session_id,),
@@ -1787,7 +2175,7 @@ def dev_test_payment(
         }), 404
 
     result = process_completed_payment(
-        session_id,
+        payment_session["id"],
         invoice_id=(
             payment_session.get(
                 "checkout_request_id"
@@ -1797,9 +2185,8 @@ def dev_test_payment(
 
     try:
         coins_bp.fulfil_payment_purpose(
-            session_id
+            payment_session["id"]
         )
-
     except Exception:
         app.logger.exception(
             "Unable to fulfil test payment purpose."

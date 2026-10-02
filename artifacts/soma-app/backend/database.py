@@ -79,6 +79,9 @@ def init_database():
     connection = get_connection()
 
     try:
+        # ---------------------------------------------------------
+        # STUDENTS
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS students (
@@ -94,8 +97,6 @@ def init_database():
             """
         )
 
-        # Existing databases may already have the students table without
-        # the newer "school" column. Add it safely without deleting data.
         connection.execute(
             """
             ALTER TABLE students
@@ -103,8 +104,7 @@ def init_database():
             """
         )
 
-        # Preserve existing school names when upgrading from the older
-        # school_name column to the newer school column.
+        # Preserve existing school information from the old column.
         connection.execute(
             """
             UPDATE students
@@ -115,6 +115,9 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # ADMINS
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS admins (
@@ -126,6 +129,9 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # TERM PERFORMANCE
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS term_points (
@@ -146,6 +152,9 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # QUIZ RESULTS
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS quiz_results (
@@ -167,6 +176,9 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # INTASEND PAYMENT SESSIONS
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS payment_sessions (
@@ -178,6 +190,7 @@ def init_database():
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 checkout_request_id TEXT,
                 merchant_request_id TEXT,
+                phone_number TEXT,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 completed_at TEXT,
@@ -190,6 +203,21 @@ def init_database():
             """
         )
 
+        # Existing databases may already have payment_sessions
+        # without phone_number.
+        connection.execute(
+            """
+            ALTER TABLE payment_sessions
+            ADD COLUMN IF NOT EXISTS phone_number TEXT
+            """
+        )
+
+        # ---------------------------------------------------------
+        # LEGACY MPESA TRANSACTIONS
+        #
+        # Kept only for database compatibility with existing data.
+        # SOMA HUB's current payment flow is IntaSend.
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS mpesa_transactions (
@@ -217,6 +245,12 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # WALLET TRANSACTIONS
+        #
+        # Positive amount  = money added to SOMA Points wallet.
+        # Negative amount  = money spent on a material.
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS wallet_transactions (
@@ -235,6 +269,12 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # LEGACY COIN TRANSACTIONS
+        #
+        # Kept for compatibility with older data/code.
+        # New SOMA HUB payments use wallet_transactions.
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS coin_transactions (
@@ -253,6 +293,9 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # MATERIAL UNLOCKS
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS material_unlocks (
@@ -271,6 +314,12 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # SUBSCRIPTIONS
+        #
+        # Kept in the database for compatibility with existing data.
+        # The user-facing Grade subscription will be removed separately.
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -290,6 +339,9 @@ def init_database():
             """
         )
 
+        # ---------------------------------------------------------
+        # INDEXES
+        # ---------------------------------------------------------
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_subscriptions_soma_code
@@ -378,6 +430,13 @@ def init_database():
             """
             CREATE INDEX IF NOT EXISTS idx_wallet_transactions_soma_code
             ON wallet_transactions(soma_hub_code)
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_wallet_transactions_reference
+            ON wallet_transactions(reference)
             """
         )
 

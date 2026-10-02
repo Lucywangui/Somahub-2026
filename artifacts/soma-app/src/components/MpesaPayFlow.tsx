@@ -21,7 +21,7 @@ export interface PaymentCompleted {
 }
 
 interface Props {
-  /** Amount for a purchase. Omit to let the student choose (a top-up). */
+  /** Amount for a purchase. Omit to let the student choose a top-up. */
   fixedAmount?: number;
   purpose?: PaymentPurpose;
   /** Shown above the form, e.g. what the payment is for. */
@@ -34,20 +34,28 @@ interface Props {
 
 type Step =
   | { name: "form" }
-  | { name: "waiting"; sessionId: string; amount: number }
+  | {
+      name: "waiting";
+      sessionId: string;
+      amount: number;
+      paymentUrl?: string | null;
+    }
   | { name: "failed"; message: string }
   | { name: "timeout" };
 
 const QUICK_AMOUNTS = [20, 50, 100, 200];
 
-const PHONE_STORAGE_KEY = "soma_mpesa_phone";
+const PHONE_STORAGE_KEY = "soma_payment_phone";
 
 const FAILURE_MESSAGES = {
-  failed: "The payment was cancelled or didn't go through. No money was taken.",
-  expired: "The payment request expired before it was completed.",
+  failed:
+    "The payment was cancelled or didn't go through. No money was taken.",
+  expired:
+    "The payment request expired before it was completed.",
 };
 
-export const formatKsh = (amount: number) => `KSh ${amount.toLocaleString()}`;
+export const formatKsh = (amount: number) =>
+  `KSh ${amount.toLocaleString()}`;
 
 function loadSavedPhone(): string {
   try {
@@ -66,9 +74,12 @@ function savePhone(phone: string) {
 }
 
 /**
- * The M-Pesa STK Push steps: phone (and amount), "check your phone"
- * while polling, then failure or timeout. On success it hands over to
- * the parent through onCompleted, which decides what to show next.
+ * IntaSend payment flow:
+ * payment details -> IntaSend checkout -> payment confirmation ->
+ * wallet update.
+ *
+ * The backend remains responsible for confirming the payment and
+ * crediting the student's paid SOMA Points wallet.
  */
 export function MpesaPayFlow({
   fixedAmount,
@@ -83,21 +94,37 @@ export function MpesaPayFlow({
 
   const [step, setStep] = useState<Step>({ name: "form" });
   const [phone, setPhone] = useState(loadSavedPhone);
-  const [amount, setAmount] = useState(fixedAmount ? String(fixedAmount) : "");
+  const [amount, setAmount] = useState(
+    fixedAmount ? String(fixedAmount) : "",
+  );
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
   const pollAbort = useRef<AbortController | null>(null);
 
-  useEffect(() => () => pollAbort.current?.abort(), []);
+  useEffect(
+    () => () => {
+      pollAbort.current?.abort();
+    },
+    [],
+  );
 
-  const waitForPayment = async (sessionId: string, paidAmount: number) => {
+  const waitForPayment = async (
+    sessionId: string,
+    paidAmount: number,
+  ) => {
     pollAbort.current?.abort();
+
     const controller = new AbortController();
     pollAbort.current = controller;
 
-    const outcome = await pollPaymentStatus(sessionId, { signal: controller.signal });
+    const outcome = await pollPaymentStatus(sessionId, {
+      signal: controller.signal,
+    });
 
-    if (outcome.status === "aborted") return;
+    if (outcome.status === "aborted") {
+      return;
+    }
 
     if (outcome.status === "completed") {
       onCompleted({
@@ -108,7 +135,10 @@ export function MpesaPayFlow({
     } else if (outcome.status === "timeout") {
       setStep({ name: "timeout" });
     } else {
-      setStep({ name: "failed", message: FAILURE_MESSAGES[outcome.status] });
+      setStep({
+        name: "failed",
+        message: FAILURE_MESSAGES[outcome.status],
+      });
     }
   };
 
@@ -119,13 +149,15 @@ export function MpesaPayFlow({
 
     if (!isValidTopUpAmount(numericAmount)) {
       setFormError(
-        `Enter a whole amount between ${formatKsh(MIN_TOPUP_AMOUNT)} and ${formatKsh(MAX_TOPUP_AMOUNT)}.`,
+        `Enter a whole amount between ${formatKsh(
+          MIN_TOPUP_AMOUNT,
+        )} and ${formatKsh(MAX_TOPUP_AMOUNT)}.`,
       );
       return;
     }
 
     if (!phone.trim()) {
-      setFormError("Enter the M-Pesa phone number to charge.");
+      setFormError("Enter your phone number for the payment.");
       return;
     }
 
@@ -133,13 +165,43 @@ export function MpesaPayFlow({
     setIsSubmitting(true);
 
     try {
-      const { sessionId } = await startTopUp(phone.trim(), numericAmount, purpose);
+      const result = await startTopUp(
+        phone.trim(),
+        numericAmount,
+        purpose,
+      );
+
       savePhone(phone.trim());
-      setStep({ name: "waiting", sessionId, amount: numericAmount });
-      void waitForPayment(sessionId, numericAmount);
+
+      setStep({
+        name: "waiting",
+        sessionId: result.sessionId,
+        amount: numericAmount,
+        paymentUrl: result.paymentUrl,
+      });
+
+      /*
+       * If IntaSend returns a hosted checkout URL, open it in a
+       * new browser tab/window. The payment is still confirmed
+       * by the backend before the wallet is credited.
+       */
+      if (result.paymentUrl) {
+        window.open(
+          result.paymentUrl,
+          "_blank",
+          "noopener,noreferrer",
+        );
+      }
+
+      void waitForPayment(
+        result.sessionId,
+        numericAmount,
+      );
     } catch (error) {
       setFormError(
-        error instanceof ApiError ? error.message : "Something went wrong. Please try again.",
+        error instanceof ApiError
+          ? error.message
+          : "Something went wrong. Please try again.",
       );
     } finally {
       setIsSubmitting(false);
@@ -153,32 +215,57 @@ export function MpesaPayFlow({
       toast({
         variant: "destructive",
         title: "Simulation failed",
-        description: error instanceof Error ? error.message : undefined,
+        description:
+          error instanceof Error
+            ? error.message
+            : undefined,
       });
     }
   };
 
   if (step.name === "form") {
     return (
-      <form className="px-6 py-5 space-y-4" onSubmit={handleSubmit}>
-        {description && <p className="text-sm text-muted-foreground">{description}</p>}
+      <form
+        className="px-6 py-5 space-y-4"
+        onSubmit={handleSubmit}
+      >
+        {description && (
+          <p className="text-sm text-muted-foreground">
+            {description}
+          </p>
+        )}
 
         <div className="space-y-1.5">
-          <label htmlFor="mpesa-phone" className="text-sm font-bold">M-Pesa phone number</label>
+          <label
+            htmlFor="payment-phone"
+            className="text-sm font-bold"
+          >
+            Phone number
+          </label>
+
           <Input
-            id="mpesa-phone"
+            id="payment-phone"
             type="tel"
             inputMode="tel"
             placeholder="0712 345 678"
             value={phone}
-            onChange={(e) => { setPhone(e.target.value); setFormError(null); }}
+            onChange={(e) => {
+              setPhone(e.target.value);
+              setFormError(null);
+            }}
             className="rounded-xl"
           />
         </div>
 
         {fixedAmount === undefined && (
           <div className="space-y-1.5">
-            <label htmlFor="mpesa-amount" className="text-sm font-bold">Amount (KSh)</label>
+            <label
+              htmlFor="payment-amount"
+              className="text-sm font-bold"
+            >
+              Amount (KSh)
+            </label>
+
             <div className="grid grid-cols-4 gap-2">
               {QUICK_AMOUNTS.map((quick) => (
                 <Button
@@ -191,14 +278,18 @@ export function MpesaPayFlow({
                       ? "rounded-xl border-[#25D366] bg-[#25D366]/15 font-bold"
                       : "rounded-xl"
                   }
-                  onClick={() => { setAmount(String(quick)); setFormError(null); }}
+                  onClick={() => {
+                    setAmount(String(quick));
+                    setFormError(null);
+                  }}
                 >
                   {quick}
                 </Button>
               ))}
             </div>
+
             <Input
-              id="mpesa-amount"
+              id="payment-amount"
               type="number"
               inputMode="numeric"
               min={MIN_TOPUP_AMOUNT}
@@ -206,14 +297,22 @@ export function MpesaPayFlow({
               step={1}
               placeholder="Or enter an amount"
               value={amount}
-              onChange={(e) => { setAmount(e.target.value); setFormError(null); }}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                setFormError(null);
+              }}
               className="rounded-xl"
             />
           </div>
         )}
 
         {formError && (
-          <p role="alert" className="text-sm text-destructive">{formError}</p>
+          <p
+            role="alert"
+            className="text-sm text-destructive"
+          >
+            {formError}
+          </p>
         )}
 
         <div className="flex gap-2">
@@ -221,10 +320,14 @@ export function MpesaPayFlow({
             type="button"
             variant="outline"
             className="flex-1 rounded-xl"
-            onClick={() => { setFormError(null); onBack(); }}
+            onClick={() => {
+              setFormError(null);
+              onBack();
+            }}
           >
             Back
           </Button>
+
           <Button
             type="submit"
             disabled={isSubmitting}
@@ -232,8 +335,11 @@ export function MpesaPayFlow({
             style={{ background: "#25D366" }}
           >
             {isSubmitting
-              ? "Sending…"
-              : submitLabel ?? (fixedAmount ? `Pay ${formatKsh(fixedAmount)}` : "Pay")}
+              ? "Opening payment…"
+              : submitLabel ??
+                (fixedAmount
+                  ? `Pay ${formatKsh(fixedAmount)}`
+                  : "Pay")}
           </Button>
         </div>
       </form>
@@ -244,22 +350,53 @@ export function MpesaPayFlow({
     return (
       <div className="px-6 py-6 space-y-4 text-center">
         <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-muted border-t-[#25D366]" />
+
         <div>
-          <p className="font-bold">Check your phone</p>
+          <p className="font-bold">
+            Complete your payment
+          </p>
+
           <p className="text-sm text-muted-foreground mt-1">
-            Enter your M-Pesa PIN to pay {formatKsh(step.amount)}. We'll carry on as soon as it goes through.
+            Complete the IntaSend payment for{" "}
+            {formatKsh(step.amount)}. We’ll update your
+            SOMA Points wallet as soon as the payment is
+            confirmed.
           </p>
         </div>
+
+        {step.paymentUrl && (
+          <Button
+            variant="outline"
+            className="w-full rounded-xl"
+            onClick={() =>
+              window.open(
+                step.paymentUrl!,
+                "_blank",
+                "noopener,noreferrer",
+              )
+            }
+          >
+            Open payment page
+          </Button>
+        )}
+
         {import.meta.env.DEV && (
           <Button
             variant="ghost"
             className="rounded-xl text-xs text-muted-foreground"
-            onClick={() => handleSimulate(step.sessionId)}
+            onClick={() =>
+              handleSimulate(step.sessionId)
+            }
           >
             Simulate success (dev)
           </Button>
         )}
-        <Button variant="outline" className="w-full rounded-xl" onClick={onClose}>
+
+        <Button
+          variant="outline"
+          className="w-full rounded-xl"
+          onClick={onClose}
+        >
           Close
         </Button>
       </div>
@@ -270,10 +407,28 @@ export function MpesaPayFlow({
     return (
       <div className="px-6 py-6 space-y-4 text-center">
         <div className="text-4xl">⚠️</div>
-        <p className="text-sm text-muted-foreground">{step.message}</p>
+
+        <p className="text-sm text-muted-foreground">
+          {step.message}
+        </p>
+
         <div className="flex gap-2">
-          <Button variant="outline" className="flex-1 rounded-xl" onClick={onClose}>Close</Button>
-          <Button className="flex-1 rounded-xl" onClick={() => setStep({ name: "form" })}>Try again</Button>
+          <Button
+            variant="outline"
+            className="flex-1 rounded-xl"
+            onClick={onClose}
+          >
+            Close
+          </Button>
+
+          <Button
+            className="flex-1 rounded-xl"
+            onClick={() =>
+              setStep({ name: "form" })
+            }
+          >
+            Try again
+          </Button>
         </div>
       </div>
     );
@@ -282,10 +437,19 @@ export function MpesaPayFlow({
   return (
     <div className="px-6 py-6 space-y-4 text-center">
       <div className="text-4xl">⏳</div>
+
       <p className="text-sm text-muted-foreground">
-        We haven't heard back from M-Pesa yet. If you completed the payment, your wallet will update shortly.
+        We haven’t received the payment confirmation yet.
+        If you completed the payment, your SOMA Points
+        wallet will update once IntaSend confirms it.
       </p>
-      <Button className="w-full rounded-xl" onClick={onClose}>Done</Button>
+
+      <Button
+        className="w-full rounded-xl"
+        onClick={onClose}
+      >
+        Done
+      </Button>
     </div>
   );
 }
