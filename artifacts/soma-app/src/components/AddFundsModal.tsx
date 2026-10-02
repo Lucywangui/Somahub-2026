@@ -9,7 +9,7 @@ import { gradeShortName } from "@/data/grade";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import {
-  MpesaPayFlow,
+  MpesaPayFlow as IntaSendPayFlow,
   formatKsh,
   type PaymentCompleted,
 } from "@/components/MpesaPayFlow";
@@ -146,7 +146,7 @@ export function AddFundsModal({
     }
   };
 
-  const mpesaHeader = (title: string) => (
+  const paymentHeader = (title: string) => (
     <div
       className="px-6 pt-6 pb-5 text-white text-center"
       style={{
@@ -304,7 +304,7 @@ export function AddFundsModal({
                     </p>
 
                     <p className="text-xs text-muted-foreground">
-                      Pay through M-Pesa to add funds
+                      Pay through IntaSend to add funds
                       to your SOMA HUB wallet.
                     </p>
                   </div>
@@ -361,9 +361,9 @@ export function AddFundsModal({
 
         {step.name === "top-up" && (
           <>
-            {mpesaHeader("M-Pesa Top Up")}
+            {paymentHeader("Wallet Top Up")}
 
-            <MpesaPayFlow
+            <IntaSendPayFlow
               onBack={() =>
                 setStep({
                   name: "overview",
@@ -377,9 +377,9 @@ export function AddFundsModal({
 
         {step.name === "subscribe-pay" && (
           <>
-            {mpesaHeader("Subscribe")}
+            {paymentHeader("Subscribe")}
 
-            <MpesaPayFlow
+            <IntaSendPayFlow
               fixedAmount={step.amount}
               purpose="subscribe"
               description={
@@ -388,7 +388,7 @@ export function AddFundsModal({
                       balance ?? 0
                     )} from your wallet plus ${formatKsh(
                       step.amount
-                    )} by M-Pesa pays for ${
+                    )} through IntaSend pays for ${
                       prices.subscriptionDays
                     } days of all ${gradeLabel} materials.`
                   : `${formatKsh(
@@ -410,7 +410,7 @@ export function AddFundsModal({
 
         {step.name === "topped-up" && (
           <>
-            {mpesaHeader("M-Pesa Top Up")}
+            {paymentHeader("Wallet Top Up")}
 
             <div className="px-6 py-6 space-y-4 text-center">
               <div className="text-4xl">✅</div>
@@ -442,7 +442,7 @@ export function AddFundsModal({
 
         {step.name === "subscribed" && (
           <>
-            {mpesaHeader("Subscribed")}
+            {paymentHeader("Subscribed")}
 
             <div className="px-6 py-6 space-y-4 text-center">
               <div className="text-4xl">🎉</div>
@@ -475,7 +475,7 @@ export function AddFundsModal({
 
         {step.name === "subscribe-failed" && (
           <>
-            {mpesaHeader("Subscribe")}
+            {paymentHeader("Subscribe")}
 
             <div className="px-6 py-6 space-y-4 text-center">
               <div className="text-4xl">⚠️</div>
