@@ -67,7 +67,10 @@ def get_connection():
             "to the environment before starting the backend."
         )
 
-    connection = psycopg2.connect(DATABASE_URL)
+    connection = psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=RealDictCursor
+    )
 
     return DatabaseConnection(connection)
 
