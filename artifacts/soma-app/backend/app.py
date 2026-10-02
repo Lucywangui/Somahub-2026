@@ -1,6 +1,7 @@
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
@@ -18,11 +19,21 @@ from intasend import APIService
 
 load_dotenv()
 
-INTASEND_PUBLISHABLE_KEY = os.getenv("INTASEND_PUBLISHABLE_KEY", "").strip()
-INTASEND_SECRET_KEY = os.getenv("INTASEND_SECRET_KEY", "").strip()
+INTASEND_PUBLISHABLE_KEY = os.getenv(
+    "INTASEND_PUBLISHABLE_KEY",
+    ""
+).strip()
+
+INTASEND_SECRET_KEY = os.getenv(
+    "INTASEND_SECRET_KEY",
+    ""
+).strip()
 
 INTASEND_TEST_ENVIRONMENT = (
-    os.getenv("INTASEND_TEST_ENVIRONMENT", "true").strip().lower()
+    os.getenv(
+        "INTASEND_TEST_ENVIRONMENT",
+        "true"
+    ).strip().lower()
     in ("1", "true", "yes", "on")
 )
 
@@ -73,12 +84,147 @@ app.config["SESSION_COOKIE_SAMESITE"] = "None"
 
 
 # ============================================================
-# HELPERS
+# TIME / DATABASE HELPERS
 # ============================================================
 
 def utc_now():
     return datetime.now(timezone.utc)
 
+
+def now_string():
+    """
+    Return the timestamp format expected by the existing
+    PostgreSQL tables used by coins.py.
+    """
+    return datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def get_db():
+    """
+    Compatibility wrapper used by coins.py.
+
+    coins.py expects get_db() to return a PostgreSQL
+    connection that can be used directly with conn.execute().
+    """
+
+    return database.get_db_connection()
+
+
+def is_sandbox():
+    return INTASEND_TEST_ENVIRONMENT
+
+
+def calculate_wallet_balance(
+    conn_or_code,
+    soma_hub_code=None,
+):
+    """
+    Calculate the student's paid SOMA Points balance.
+
+    This function supports BOTH forms:
+
+        calculate_wallet_balance(code)
+
+    and:
+
+        calculate_wallet_balance(conn, code)
+
+    The second form is required by coins.py so that wallet
+    calculations can happen inside the same database connection.
+    """
+
+    # --------------------------------------------------------
+    # Called as calculate_wallet_balance(code)
+    # --------------------------------------------------------
+    if soma_hub_code is None:
+        code = str(
+            conn_or_code
+        ).strip().upper()
+
+        with database.get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN transaction_type = 'CREDIT'
+                                    THEN amount
+                                    WHEN transaction_type = 'DEBIT'
+                                    THEN -amount
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS balance
+                    FROM wallet_transactions
+                    WHERE soma_hub_code = %s
+                    """,
+                    (code,),
+                )
+
+                row = cur.fetchone()
+
+        if not row:
+            return 0
+
+        return max(
+            0,
+            int(row["balance"] or 0)
+        )
+
+    # --------------------------------------------------------
+    # Called as calculate_wallet_balance(conn, code)
+    # --------------------------------------------------------
+    conn = conn_or_code
+    code = str(
+        soma_hub_code
+    ).strip().upper()
+
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN transaction_type = 'CREDIT'
+                            THEN amount
+                            WHEN transaction_type = 'DEBIT'
+                            THEN -amount
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS balance
+            FROM wallet_transactions
+            WHERE soma_hub_code = %s
+            """,
+            (code,),
+        )
+
+        row = cursor.fetchone()
+
+    finally:
+        cursor.close()
+
+    if not row:
+        return 0
+
+    return max(
+        0,
+        int(row["balance"] or 0)
+    )
+
+
+# ============================================================
+# PAYMENT HELPERS
+# ============================================================
 
 def normalize_phone(phone):
     """
@@ -89,10 +235,16 @@ def normalize_phone(phone):
         712345678 -> 254712345678
         +254712345678 -> 254712345678
     """
+
     if phone is None:
         return None
 
-    phone = str(phone).strip().replace(" ", "").replace("-", "")
+    phone = (
+        str(phone)
+        .strip()
+        .replace(" ", "")
+        .replace("-", "")
+    )
 
     if phone.startswith("+"):
         phone = phone[1:]
@@ -118,55 +270,20 @@ def normalize_phone(phone):
     return phone
 
 
-def calculate_wallet_balance(soma_hub_code):
-    """
-    Calculate the student's paid SOMA Points balance from
-    wallet transactions.
-
-    CREDIT  = adds points
-    DEBIT   = removes points
-    """
-
-    with database.get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    COALESCE(
-                        SUM(
-                            CASE
-                                WHEN transaction_type = 'CREDIT'
-                                THEN amount
-                                WHEN transaction_type = 'DEBIT'
-                                THEN -amount
-                                ELSE 0
-                            END
-                        ),
-                        0
-                    ) AS balance
-                FROM wallet_transactions
-                WHERE soma_hub_code = %s
-                """,
-                (soma_hub_code,),
-            )
-
-            row = cur.fetchone()
-
-    if not row:
-        return 0
-
-    return max(0, int(row["balance"] or 0))
-
-
 def get_intasend_service():
-    if not INTASEND_SECRET_KEY and not INTASEND_PUBLISHABLE_KEY:
+    if (
+        not INTASEND_SECRET_KEY
+        and not INTASEND_PUBLISHABLE_KEY
+    ):
         raise RuntimeError(
             "IntaSend credentials are not configured."
         )
 
     return APIService(
         token=INTASEND_SECRET_KEY or None,
-        publishable_key=INTASEND_PUBLISHABLE_KEY or None,
+        publishable_key=(
+            INTASEND_PUBLISHABLE_KEY or None
+        ),
         test=INTASEND_TEST_ENVIRONMENT,
     )
 
@@ -175,12 +292,21 @@ def extract_intasend_invoice_id(response):
     if not isinstance(response, dict):
         return None
 
-    return (
-        response.get("invoice_id")
-        or response.get("invoice", {}).get("invoice_id")
-        if isinstance(response.get("invoice"), dict)
-        else response.get("invoice_id")
+    invoice_id = response.get(
+        "invoice_id"
     )
+
+    if invoice_id:
+        return invoice_id
+
+    invoice = response.get("invoice")
+
+    if isinstance(invoice, dict):
+        return invoice.get(
+            "invoice_id"
+        )
+
+    return None
 
 
 def extract_intasend_url(response):
@@ -198,7 +324,10 @@ def extract_intasend_api_ref(response):
     if not isinstance(response, dict):
         return None
 
-    return response.get("api_ref") or response.get("api_reference")
+    return (
+        response.get("api_ref")
+        or response.get("api_reference")
+    )
 
 
 def extract_intasend_invoice(response):
@@ -213,7 +342,10 @@ def extract_intasend_invoice(response):
     return response
 
 
-def process_completed_payment(payment_session_id, invoice_id=None):
+def process_completed_payment(
+    payment_session_id,
+    invoice_id=None,
+):
     """
     Credit the student's wallet exactly once after IntaSend
     confirms the payment as COMPLETE.
@@ -247,8 +379,13 @@ def process_completed_payment(payment_session_id, invoice_id=None):
                     "message": "Payment already processed."
                 }
 
-            amount = int(payment_session["amount"])
-            soma_hub_code = payment_session["soma_hub_code"]
+            amount = int(
+                payment_session["amount"]
+            )
+
+            soma_hub_code = (
+                payment_session["soma_hub_code"]
+            )
 
             reference = (
                 payment_session["checkout_request_id"]
@@ -335,12 +472,18 @@ def process_completed_payment(payment_session_id, invoice_id=None):
     }
 
 
-def sync_payment_from_intasend(payment_session):
+def sync_payment_from_intasend(
+    payment_session
+):
     """
     Ask IntaSend for the latest payment status.
     """
 
-    invoice_id = payment_session.get("checkout_request_id")
+    invoice_id = (
+        payment_session.get(
+            "checkout_request_id"
+        )
+    )
 
     if not invoice_id:
         return {
@@ -356,18 +499,30 @@ def sync_payment_from_intasend(payment_session):
             invoice_id=invoice_id
         )
 
-        invoice = extract_intasend_invoice(response)
-
-        state = (
-            invoice.get("state")
-            or invoice.get("status")
-            or response.get("state")
-            or response.get("status")
-            if isinstance(response, dict)
-            else None
+        invoice = extract_intasend_invoice(
+            response
         )
 
-        state = str(state or "").upper()
+        state = None
+
+        if isinstance(invoice, dict):
+            state = (
+                invoice.get("state")
+                or invoice.get("status")
+            )
+
+        if not state and isinstance(
+            response,
+            dict
+        ):
+            state = (
+                response.get("state")
+                or response.get("status")
+            )
+
+        state = str(
+            state or ""
+        ).upper()
 
         if state == "COMPLETE":
             result = process_completed_payment(
@@ -379,7 +534,10 @@ def sync_payment_from_intasend(payment_session):
                 "success": True,
                 "state": "COMPLETE",
                 "message": "Payment completed.",
-                "processed": result.get("success", False),
+                "processed": result.get(
+                    "success",
+                    False
+                ),
             }
 
         if state == "FAILED":
@@ -391,7 +549,9 @@ def sync_payment_from_intasend(payment_session):
                         SET status = 'failed'
                         WHERE id = %s
                         """,
-                        (payment_session["id"],),
+                        (
+                            payment_session["id"],
+                        ),
                     )
 
                     conn.commit()
@@ -417,11 +577,19 @@ def sync_payment_from_intasend(payment_session):
         return {
             "success": False,
             "state": "PENDING",
-            "message": "Unable to verify payment right now."
+            "message": (
+                "Unable to verify payment right now."
+            )
         }
 
 
-def get_student_by_code(soma_hub_code):
+def get_student_by_code(
+    soma_hub_code
+):
+    code = str(
+        soma_hub_code
+    ).strip().upper()
+
     with database.get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -431,7 +599,7 @@ def get_student_by_code(soma_hub_code):
                 WHERE soma_hub_code = %s
                 LIMIT 1
                 """,
-                (soma_hub_code,),
+                (code,),
             )
 
             return cur.fetchone()
@@ -444,7 +612,9 @@ def get_student_by_code(soma_hub_code):
 @app.get("/")
 def home():
     return jsonify({
-        "message": "SOMA HUB Flask backend is running",
+        "message": (
+            "SOMA HUB Flask backend is running"
+        ),
         "success": True
     })
 
@@ -485,28 +655,44 @@ def intasend_config_test():
 
 @app.post("/api/students/register")
 def register_student():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(
+        silent=True
+    ) or {}
 
     soma_hub_code = str(
-        data.get("soma_hub_code", "")
+        data.get(
+            "soma_hub_code",
+            ""
+        )
     ).strip()
 
     name = str(
-        data.get("name", "")
+        data.get(
+            "name",
+            ""
+        )
     ).strip()
 
     grade = str(
-        data.get("grade", "")
+        data.get(
+            "grade",
+            ""
+        )
     ).strip()
 
     school = str(
-        data.get("school", "")
+        data.get(
+            "school",
+            ""
+        )
     ).strip()
 
     if not soma_hub_code:
         return jsonify({
             "success": False,
-            "message": "SOMA HUB code is required."
+            "message": (
+                "SOMA HUB code is required."
+            )
         }), 400
 
     with database.get_db_connection() as conn:
@@ -529,9 +715,18 @@ def register_student():
                     """
                     UPDATE students
                     SET
-                        name = COALESCE(NULLIF(%s, ''), name),
-                        grade = COALESCE(NULLIF(%s, ''), grade),
-                        school = COALESCE(NULLIF(%s, ''), school)
+                        name = COALESCE(
+                            NULLIF(%s, ''),
+                            name
+                        ),
+                        grade = COALESCE(
+                            NULLIF(%s, ''),
+                            grade
+                        ),
+                        school = COALESCE(
+                            NULLIF(%s, ''),
+                            school
+                        )
                     WHERE soma_hub_code = %s
                     """,
                     (
@@ -550,7 +745,12 @@ def register_student():
                         grade,
                         school
                     )
-                    VALUES (%s, %s, %s, %s)
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
                     """,
                     (
                         soma_hub_code,
@@ -564,7 +764,9 @@ def register_student():
 
     return jsonify({
         "success": True,
-        "message": "Student synced successfully.",
+        "message": (
+            "Student synced successfully."
+        ),
         "soma_hub_code": soma_hub_code
     })
 
@@ -578,16 +780,23 @@ def register_student():
     methods=["GET", "POST"]
 )
 def student_performance():
+
     if request.method == "GET":
         soma_hub_code = (
-            request.args.get("soma_hub_code")
-            or request.args.get("code")
+            request.args.get(
+                "soma_hub_code"
+            )
+            or request.args.get(
+                "code"
+            )
         )
 
         if not soma_hub_code:
             return jsonify({
                 "success": False,
-                "message": "SOMA HUB code is required."
+                "message": (
+                    "SOMA HUB code is required."
+                )
             }), 400
 
         with database.get_db_connection() as conn:
@@ -610,40 +819,65 @@ def student_performance():
             "performance": rows
         })
 
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(
+        silent=True
+    ) or {}
 
     soma_hub_code = str(
-        data.get("soma_hub_code", "")
+        data.get(
+            "soma_hub_code",
+            ""
+        )
     ).strip()
 
     term = str(
-        data.get("term", "")
+        data.get(
+            "term",
+            ""
+        )
     ).strip()
 
     if not soma_hub_code or not term:
         return jsonify({
             "success": False,
-            "message": "SOMA HUB code and term are required."
+            "message": (
+                "SOMA HUB code and term are required."
+            )
         }), 400
 
     study_notes = int(
-        data.get("studyNotes", 0) or 0
+        data.get(
+            "studyNotes",
+            0
+        ) or 0
     )
 
     topical_quizzes = int(
-        data.get("topicalQuizzes", 0) or 0
+        data.get(
+            "topicalQuizzes",
+            0
+        ) or 0
     )
 
     exams = int(
-        data.get("exams", 0) or 0
+        data.get(
+            "exams",
+            0
+        ) or 0
     )
 
     consistency = int(
-        data.get("consistency", 0) or 0
+        data.get(
+            "consistency",
+            0
+        ) or 0
     )
 
     progress = int(
-        data.get("progress", 0) or 0
+        data.get(
+            "progress",
+            0
+        ) or 0
     )
 
     total = min(
@@ -670,19 +904,32 @@ def student_performance():
                     total_points
                 )
                 VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
                 )
                 ON CONFLICT (
                     soma_hub_code,
                     term
                 )
                 DO UPDATE SET
-                    study_notes = EXCLUDED.study_notes,
-                    topical_quizzes = EXCLUDED.topical_quizzes,
-                    exams = EXCLUDED.exams,
-                    consistency = EXCLUDED.consistency,
-                    progress = EXCLUDED.progress,
-                    total_points = EXCLUDED.total_points
+                    study_notes =
+                        EXCLUDED.study_notes,
+                    topical_quizzes =
+                        EXCLUDED.topical_quizzes,
+                    exams =
+                        EXCLUDED.exams,
+                    consistency =
+                        EXCLUDED.consistency,
+                    progress =
+                        EXCLUDED.progress,
+                    total_points =
+                        EXCLUDED.total_points
                 """,
                 (
                     soma_hub_code,
@@ -700,7 +947,9 @@ def student_performance():
 
     return jsonify({
         "success": True,
-        "message": "Performance synced successfully.",
+        "message": (
+            "Performance synced successfully."
+        ),
         "soma_hub_code": soma_hub_code,
         "term": term,
         "total_points": total
@@ -713,20 +962,30 @@ def student_performance():
 
 @app.post("/api/admin/login")
 def admin_login():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(
+        silent=True
+    ) or {}
 
     username = str(
-        data.get("username", "")
+        data.get(
+            "username",
+            ""
+        )
     ).strip()
 
     password = str(
-        data.get("password", "")
+        data.get(
+            "password",
+            ""
+        )
     )
 
     if not username or not password:
         return jsonify({
             "success": False,
-            "message": "Username and password are required."
+            "message": (
+                "Username and password are required."
+            )
         }), 400
 
     with database.get_db_connection() as conn:
@@ -757,21 +1016,30 @@ def admin_login():
     if not password_hash:
         return jsonify({
             "success": False,
-            "message": "Admin account is not configured correctly."
+            "message": (
+                "Admin account is not configured correctly."
+            )
         }), 500
 
-    if not check_password_hash(password_hash, password):
+    if not check_password_hash(
+        password_hash,
+        password
+    ):
         return jsonify({
             "success": False,
             "message": "Invalid login details."
         }), 401
 
     session["admin_id"] = admin["id"]
-    session["admin_username"] = admin["username"]
+    session["admin_username"] = (
+        admin["username"]
+    )
 
     return jsonify({
         "success": True,
-        "message": "Admin login successful.",
+        "message": (
+            "Admin login successful."
+        ),
         "username": admin["username"]
     })
 
@@ -787,7 +1055,9 @@ def admin_me():
     return jsonify({
         "success": True,
         "authenticated": True,
-        "username": session.get("admin_username")
+        "username": session.get(
+            "admin_username"
+        )
     })
 
 
@@ -805,15 +1075,23 @@ def admin_logout():
 # ADMIN STUDENT LOOKUP
 # ============================================================
 
-@app.get("/api/admin/student/<soma_hub_code>")
-def admin_student_lookup(soma_hub_code):
+@app.get(
+    "/api/admin/student/<soma_hub_code>"
+)
+def admin_student_lookup(
+    soma_hub_code
+):
     if not session.get("admin_id"):
         return jsonify({
             "success": False,
-            "message": "Admin authentication required."
+            "message": (
+                "Admin authentication required."
+            )
         }), 401
 
-    student = get_student_by_code(soma_hub_code)
+    student = get_student_by_code(
+        soma_hub_code
+    )
 
     if not student:
         return jsonify({
@@ -847,7 +1125,9 @@ def admin_top_students():
     if not session.get("admin_id"):
         return jsonify({
             "success": False,
-            "message": "Admin authentication required."
+            "message": (
+                "Admin authentication required."
+            )
         }), 401
 
     with database.get_db_connection() as conn:
@@ -865,7 +1145,8 @@ def admin_top_students():
                     ) AS total_points
                 FROM students s
                 LEFT JOIN student_performance p
-                    ON p.soma_hub_code = s.soma_hub_code
+                    ON p.soma_hub_code =
+                       s.soma_hub_code
                 GROUP BY
                     s.soma_hub_code,
                     s.name,
@@ -888,67 +1169,109 @@ def admin_top_students():
 # INTASEND PAYMENT SESSION
 # ============================================================
 
-@app.post("/api/intasend/payment-session")
+@app.post(
+    "/api/intasend/payment-session"
+)
 def create_intasend_payment_session():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(
+        silent=True
+    ) or {}
 
     soma_hub_code = str(
-        data.get("soma_hub_code", "")
+        data.get(
+            "soma_hub_code",
+            ""
+        )
     ).strip()
 
     purpose = str(
-        data.get("purpose", "topup")
+        data.get(
+            "purpose",
+            "topup"
+        )
     ).strip()
 
     phone_number = normalize_phone(
-        data.get("phone_number")
-        or data.get("phone")
+        data.get(
+            "phone_number"
+        )
+        or data.get(
+            "phone"
+        )
     )
 
     try:
-        amount = int(data.get("amount", 0))
-    except (TypeError, ValueError):
+        amount = int(
+            data.get(
+                "amount",
+                0
+            )
+        )
+    except (
+        TypeError,
+        ValueError
+    ):
         amount = 0
 
     if not soma_hub_code:
         return jsonify({
             "success": False,
-            "message": "SOMA HUB code is required."
+            "message": (
+                "SOMA HUB code is required."
+            )
         }), 400
 
-    if not is_valid_purpose(purpose):
+    if not is_valid_purpose(
+        purpose
+    ) and purpose != "topup":
         return jsonify({
             "success": False,
-            "message": "Invalid payment purpose."
+            "message": (
+                "Invalid payment purpose."
+            )
         }), 400
 
     if amount < 1:
         return jsonify({
             "success": False,
-            "message": "Payment amount must be at least KSh 1."
+            "message": (
+                "Payment amount must be at least KSh 1."
+            )
         }), 400
 
     if amount > 150000:
         return jsonify({
             "success": False,
-            "message": "Payment amount exceeds the allowed limit."
+            "message": (
+                "Payment amount exceeds "
+                "the allowed limit."
+            )
         }), 400
 
     if not phone_number:
         return jsonify({
             "success": False,
-            "message": "A valid Kenyan phone number is required."
+            "message": (
+                "A valid Kenyan phone number "
+                "is required."
+            )
         }), 400
 
-    student = get_student_by_code(soma_hub_code)
+    student = get_student_by_code(
+        soma_hub_code
+    )
 
     if not student:
         return jsonify({
             "success": False,
-            "message": "Student account not found."
+            "message": (
+                "Student account not found."
+            )
         }), 404
 
-    session_id = secrets.token_urlsafe(24)
+    session_id = secrets.token_urlsafe(
+        24
+    )
 
     with database.get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -987,30 +1310,43 @@ def create_intasend_payment_session():
     try:
         service = get_intasend_service()
 
-        checkout_response = service.collect.checkout(
-            phone_number=phone_number,
-            email=None,
-            amount=amount,
-            currency="KES",
-            comment=f"SOMA HUB {purpose}",
-            redirect_url=PAYMENT_REDIRECT_URL,
+        checkout_response = (
+            service.collect.checkout(
+                phone_number=phone_number,
+                email=None,
+                amount=amount,
+                currency="KES",
+                comment=(
+                    f"SOMA HUB {purpose}"
+                ),
+                redirect_url=(
+                    PAYMENT_REDIRECT_URL
+                ),
+            )
         )
 
-        invoice_id = extract_intasend_invoice_id(
-            checkout_response
+        invoice_id = (
+            extract_intasend_invoice_id(
+                checkout_response
+            )
         )
 
-        checkout_url = extract_intasend_url(
-            checkout_response
+        checkout_url = (
+            extract_intasend_url(
+                checkout_response
+            )
         )
 
-        api_ref = extract_intasend_api_ref(
-            checkout_response
+        api_ref = (
+            extract_intasend_api_ref(
+                checkout_response
+            )
         )
 
         if not invoice_id:
             raise RuntimeError(
-                "IntaSend did not return an invoice ID."
+                "IntaSend did not return "
+                "an invoice ID."
             )
 
         with database.get_db_connection() as conn:
@@ -1034,14 +1370,12 @@ def create_intasend_payment_session():
 
         return jsonify({
             "success": True,
-            "message": "IntaSend checkout created.",
+            "message": (
+                "IntaSend checkout created."
+            ),
             "session_id": session_id,
             "invoice_id": invoice_id,
-
-            # IMPORTANT:
-            # Frontend payments.ts expects payment_url.
             "payment_url": checkout_url,
-
             "amount": amount,
             "phone_number": phone_number,
         })
@@ -1068,7 +1402,8 @@ def create_intasend_payment_session():
         return jsonify({
             "success": False,
             "message": (
-                "Unable to create the IntaSend payment session."
+                "Unable to create the "
+                "IntaSend payment session."
             ),
             "error": str(exc),
         }), 500
@@ -1080,27 +1415,43 @@ def create_intasend_payment_session():
 
 @app.post("/api/intasend/webhook")
 def intasend_webhook():
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(
+        silent=True
+    ) or {}
 
     if INTASEND_WEBHOOK_CHALLENGE:
         received_challenge = (
             payload.get("challenge")
-            or request.args.get("challenge")
+            or request.args.get(
+                "challenge"
+            )
         )
 
-        if received_challenge != INTASEND_WEBHOOK_CHALLENGE:
+        if (
+            received_challenge
+            != INTASEND_WEBHOOK_CHALLENGE
+        ):
             return jsonify({
                 "success": False,
-                "message": "Invalid webhook challenge."
+                "message": (
+                    "Invalid webhook challenge."
+                )
             }), 403
 
-    invoice_id = payload.get("invoice_id")
+    invoice_id = payload.get(
+        "invoice_id"
+    )
 
     state = str(
-        payload.get("state", "")
+        payload.get(
+            "state",
+            ""
+        )
     ).upper()
 
-    api_ref = payload.get("api_ref")
+    api_ref = payload.get(
+        "api_ref"
+    )
 
     if not invoice_id and not api_ref:
         return jsonify({
@@ -1137,7 +1488,10 @@ def intasend_webhook():
     if not payment_session:
         return jsonify({
             "success": True,
-            "message": "Webhook received; no matching payment session."
+            "message": (
+                "Webhook received; "
+                "no matching payment session."
+            )
         })
 
     if state == "COMPLETE":
@@ -1147,12 +1501,8 @@ def intasend_webhook():
         )
 
         try:
-            from coins import fulfil_payment_purpose
-
-            fulfil_payment_purpose(
-                payment_session["soma_hub_code"],
-                payment_session["purpose"],
-                payment_session["amount"],
+            coins_bp.fulfil_payment_purpose(
+                payment_session["id"]
             )
 
         except Exception:
@@ -1163,7 +1513,10 @@ def intasend_webhook():
         return jsonify({
             "success": True,
             "message": "Payment completed.",
-            "processed": result.get("success", False)
+            "processed": result.get(
+                "success",
+                False
+            )
         })
 
     if state == "FAILED":
@@ -1175,19 +1528,25 @@ def intasend_webhook():
                     SET status = 'failed'
                     WHERE id = %s
                     """,
-                    (payment_session["id"],),
+                    (
+                        payment_session["id"],
+                    ),
                 )
 
                 conn.commit()
 
         return jsonify({
             "success": True,
-            "message": "Payment marked as failed."
+            "message": (
+                "Payment marked as failed."
+            )
         })
 
     return jsonify({
         "success": True,
-        "message": "Payment status received.",
+        "message": (
+            "Payment status received."
+        ),
         "state": state or "PENDING"
     })
 
@@ -1196,8 +1555,12 @@ def intasend_webhook():
 # INTASEND PAYMENT STATUS
 # ============================================================
 
-@app.get("/api/intasend/payment-status/<session_id>")
-def intasend_payment_status(session_id):
+@app.get(
+    "/api/intasend/payment-status/<session_id>"
+)
+def intasend_payment_status(
+    session_id
+):
     with database.get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1215,7 +1578,9 @@ def intasend_payment_status(session_id):
     if not payment_session:
         return jsonify({
             "success": False,
-            "message": "Payment session not found."
+            "message": (
+                "Payment session not found."
+            )
         }), 404
 
     status = str(
@@ -1223,15 +1588,24 @@ def intasend_payment_status(session_id):
     ).lower()
 
     if status == "pending":
-        created_at = payment_session.get("created_at")
+        created_at = (
+            payment_session.get(
+                "created_at"
+            )
+        )
 
         if created_at:
             if created_at.tzinfo is None:
-                created_at = created_at.replace(
-                    tzinfo=timezone.utc
+                created_at = (
+                    created_at.replace(
+                        tzinfo=timezone.utc
+                    )
                 )
 
-            if utc_now() - created_at > timedelta(minutes=30):
+            if (
+                utc_now() - created_at
+                > timedelta(minutes=30)
+            ):
                 with database.get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
@@ -1248,23 +1622,49 @@ def intasend_payment_status(session_id):
                 status = "expired"
 
         if status == "pending":
-            result = sync_payment_from_intasend(
-                payment_session
+            result = (
+                sync_payment_from_intasend(
+                    payment_session
+                )
             )
 
-            status = result.get(
+            state = result.get(
                 "state",
                 "PENDING"
             ).lower()
 
+            if state == "complete":
+                status = "completed"
+
+                # Fulfil subscription/material purpose
+                # after the wallet has been credited.
+                try:
+                    coins_bp.fulfil_payment_purpose(
+                        session_id
+                    )
+                except Exception:
+                    app.logger.exception(
+                        "Unable to fulfil payment purpose "
+                        "during payment status check."
+                    )
+
+            elif state == "failed":
+                status = "failed"
+            else:
+                status = state
+
     if status == "completed":
-        status = "complete"
+        response_status = "complete"
+    else:
+        response_status = status
 
-    wallet_balance = calculate_wallet_balance(
-        payment_session["soma_hub_code"]
+    wallet_balance_value = (
+        calculate_wallet_balance(
+            payment_session[
+                "soma_hub_code"
+            ]
+        )
     )
-
-    latest_transaction = None
 
     with database.get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -1277,7 +1677,9 @@ def intasend_payment_status(session_id):
                 LIMIT 1
                 """,
                 (
-                    payment_session["soma_hub_code"],
+                    payment_session[
+                        "soma_hub_code"
+                    ],
                 ),
             )
 
@@ -1286,13 +1688,21 @@ def intasend_payment_status(session_id):
     return jsonify({
         "success": True,
         "session_id": session_id,
-        "status": status,
-        "state": status.upper(),
-        "amount": payment_session["amount"],
-        "purpose": payment_session["purpose"],
-        "soma_hub_code": payment_session["soma_hub_code"],
-        "balance": wallet_balance,
-        "latest_transaction": latest_transaction,
+        "status": response_status,
+        "state": response_status.upper(),
+        "amount": payment_session[
+            "amount"
+        ],
+        "purpose": payment_session[
+            "purpose"
+        ],
+        "soma_hub_code": payment_session[
+            "soma_hub_code"
+        ],
+        "balance": wallet_balance_value,
+        "latest_transaction": (
+            latest_transaction
+        ),
     })
 
 
@@ -1300,9 +1710,15 @@ def intasend_payment_status(session_id):
 # WALLET
 # ============================================================
 
-@app.get("/api/wallet/<soma_hub_code>")
-def wallet_balance(soma_hub_code):
-    student = get_student_by_code(soma_hub_code)
+@app.get(
+    "/api/wallet/<soma_hub_code>"
+)
+def wallet_balance(
+    soma_hub_code
+):
+    student = get_student_by_code(
+        soma_hub_code
+    )
 
     if not student:
         return jsonify({
@@ -1327,8 +1743,12 @@ def wallet_balance(soma_hub_code):
 # DEVELOPMENT PAYMENT TEST
 # ============================================================
 
-@app.post("/api/dev/test-payment/<session_id>")
-def dev_test_payment(session_id):
+@app.post(
+    "/api/dev/test-payment/<session_id>"
+)
+def dev_test_payment(
+    session_id
+):
     """
     Sandbox-only helper.
 
@@ -1340,7 +1760,10 @@ def dev_test_payment(session_id):
     if not INTASEND_TEST_ENVIRONMENT:
         return jsonify({
             "success": False,
-            "message": "Test payment is disabled in live mode."
+            "message": (
+                "Test payment is disabled "
+                "in live mode."
+            )
         }), 403
 
     with database.get_db_connection() as conn:
@@ -1360,23 +1783,23 @@ def dev_test_payment(session_id):
     if not payment_session:
         return jsonify({
             "success": False,
-            "message": "Payment session not found."
+            "message": (
+                "Payment session not found."
+            )
         }), 404
 
     result = process_completed_payment(
         session_id,
-        invoice_id=payment_session.get(
-            "checkout_request_id"
+        invoice_id=(
+            payment_session.get(
+                "checkout_request_id"
+            )
         ),
     )
 
     try:
-        from coins import fulfil_payment_purpose
-
-        fulfil_payment_purpose(
-            payment_session["soma_hub_code"],
-            payment_session["purpose"],
-            payment_session["amount"],
+        coins_bp.fulfil_payment_purpose(
+            session_id
         )
 
     except Exception:
@@ -1385,15 +1808,22 @@ def dev_test_payment(session_id):
         )
 
     balance = calculate_wallet_balance(
-        payment_session["soma_hub_code"]
+        payment_session[
+            "soma_hub_code"
+        ]
     )
 
     return jsonify({
         "success": True,
-        "message": "Sandbox test payment completed.",
+        "message": (
+            "Sandbox test payment completed."
+        ),
         "session_id": session_id,
         "balance": balance,
-        "processed": result.get("success", False),
+        "processed": result.get(
+            "success",
+            False
+        ),
     })
 
 
@@ -1401,9 +1831,16 @@ def dev_test_payment(session_id):
 # COINS / WALLET BLUEPRINT
 # ============================================================
 
-coins_bp = create_coins_blueprint()
+coins_bp = create_coins_blueprint(
+    get_db,
+    now_string,
+    calculate_wallet_balance,
+    is_sandbox,
+)
 
-app.register_blueprint(coins_bp)
+app.register_blueprint(
+    coins_bp
+)
 
 
 # ============================================================
@@ -1412,6 +1849,7 @@ app.register_blueprint(coins_bp)
 
 try:
     database.init_db()
+
 except Exception as exc:
     app.logger.exception(
         "Database initialization failed: %s",
@@ -1425,7 +1863,10 @@ except Exception as exc:
 
 if __name__ == "__main__":
     port = int(
-        os.getenv("PORT", "5000")
+        os.getenv(
+            "PORT",
+            "5000"
+        )
     )
 
     app.run(
