@@ -337,12 +337,28 @@ def register_student():
 # STUDENT PERFORMANCE
 # ============================================================
 
-@app.route("/api/students/performance", methods=["GET"])
+@app.route(
+    "/api/students/performance",
+    methods=["GET", "POST"]
+)
 def student_performance():
-    soma_hub_code = request.args.get(
-        "soma_hub_code",
-        ""
-    ).strip()
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+
+        soma_hub_code = str(
+            data.get("soma_hub_code", "")
+        ).strip()
+
+        term_points = data.get("term_points") or {}
+    else:
+        data = {}
+
+        soma_hub_code = request.args.get(
+            "soma_hub_code",
+            ""
+        ).strip()
+
+        term_points = {}
 
     if not soma_hub_code:
         return jsonify({
@@ -375,6 +391,193 @@ def student_performance():
                 "message": "Student not found"
             }), 404
 
+        # --------------------------------------------------------
+        # POST: save/update the student's current term performance
+        # --------------------------------------------------------
+        if request.method == "POST":
+
+            def get_performance_value(*keys):
+                for key in keys:
+                    if key in term_points:
+                        value = term_points.get(key)
+                    elif key in data:
+                        value = data.get(key)
+                    else:
+                        continue
+
+                    try:
+                        return float(value or 0)
+                    except (TypeError, ValueError):
+                        return 0
+
+                return 0
+
+            study_notes = max(
+                0,
+                min(
+                    20,
+                    get_performance_value(
+                        "studyNotes",
+                        "study_notes"
+                    )
+                )
+            )
+
+            topical_quizzes = max(
+                0,
+                min(
+                    25,
+                    get_performance_value(
+                        "topicalQuizzes",
+                        "topical_quizzes"
+                    )
+                )
+            )
+
+            exams = max(
+                0,
+                min(
+                    25,
+                    get_performance_value("exams")
+                )
+            )
+
+            consistency = max(
+                0,
+                min(
+                    15,
+                    get_performance_value("consistency")
+                )
+            )
+
+            progress = max(
+                0,
+                min(
+                    15,
+                    get_performance_value("progress")
+                )
+            )
+
+            total_points = min(
+                100,
+                study_notes
+                + topical_quizzes
+                + exams
+                + consistency
+                + progress
+            )
+
+            # ----------------------------------------------------
+            # Determine year and term
+            # ----------------------------------------------------
+            current_time = datetime.now()
+
+            year = (
+                data.get("year")
+                or term_points.get("year")
+                or current_time.year
+            )
+
+            try:
+                year = int(year)
+            except (TypeError, ValueError):
+                year = current_time.year
+
+            term = (
+                data.get("term")
+                or term_points.get("term")
+            )
+
+            if not term:
+                if 1 <= current_time.month <= 4:
+                    term = "Term 1"
+                elif 5 <= current_time.month <= 8:
+                    term = "Term 2"
+                else:
+                    term = "Term 3"
+
+            term = str(term).strip()
+
+            # ----------------------------------------------------
+            # Check whether this term already exists
+            # ----------------------------------------------------
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM term_points
+                WHERE student_id = %s
+                  AND year = %s
+                  AND term = %s
+                LIMIT 1
+                """,
+                (
+                    student["id"],
+                    year,
+                    term
+                ),
+            ).fetchone()
+
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE term_points
+                    SET
+                        study_notes = %s,
+                        topical_quizzes = %s,
+                        exams = %s,
+                        consistency = %s,
+                        progress = %s,
+                        total_points = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        study_notes,
+                        topical_quizzes,
+                        exams,
+                        consistency,
+                        progress,
+                        total_points,
+                        existing["id"],
+                    ),
+                )
+
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO term_points (
+                        student_id,
+                        year,
+                        term,
+                        study_notes,
+                        topical_quizzes,
+                        exams,
+                        consistency,
+                        progress,
+                        total_points
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    """,
+                    (
+                        student["id"],
+                        year,
+                        term,
+                        study_notes,
+                        topical_quizzes,
+                        exams,
+                        consistency,
+                        progress,
+                        total_points,
+                    ),
+                )
+
+            conn.commit()
+
+        # --------------------------------------------------------
+        # Return current total performance
+        # --------------------------------------------------------
         points = conn.execute(
             """
             SELECT
@@ -390,6 +593,20 @@ def student_performance():
             "student": dict(student),
             "total_points": points["total_points"] or 0,
         })
+
+    except Exception as e:
+        conn.rollback()
+
+        print(
+            "[SOMA HUB] Performance endpoint error:",
+            str(e)
+        )
+
+        return jsonify({
+            "success": False,
+            "message": "Could not process student performance",
+            "error": str(e),
+        }), 500
 
     finally:
         conn.close()

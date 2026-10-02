@@ -1,45 +1,31 @@
 """
-SOMA Coins and material unlocks.
+SOMA HUB wallet-backed points and material unlocks.
 
-The server owns both balances:
+SOMA Points are now exactly equal to the student's paid wallet balance:
 
-    coins -> coin_transactions ledger
+    KSh 50 paid -> 50 SOMA Points
+    KSh 20 spent -> 20 SOMA Points remaining
 
-    KSh   -> wallet_transactions ledger
-
-Quiz answers are graded in the app, so the server cannot verify a
-reward claim. It limits abuse instead: each attempt pays once and
-earnings are capped per day.
+The wallet_transactions ledger is the source of truth.
+There are no free starting points, quiz rewards, or coin purchases.
 
 This version uses PostgreSQL/Neon.
 """
 
 import os
 import re
-import uuid
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
 
-MATERIAL_PRICE_COINS = int(os.getenv("MATERIAL_PRICE_COINS", "5"))
-KSH_PER_COIN = int(os.getenv("KSH_PER_COIN", "1"))
+# ============================================================
+# PRICING
+# ============================================================
 
-DAILY_COIN_CAP = int(os.getenv("DAILY_COIN_CAP", "200"))
-IMPORT_COIN_CAP = int(os.getenv("IMPORT_COIN_CAP", "500"))
-
-DEFAULT_STARTING_COINS = 100
-MAX_COINS_PER_PURCHASE = 10000
-MAX_IMPORTED_UNLOCKS = 1000
-
-REWARD_BASE = {
-    "topical": 15,
-    "exam": 25,
-}
-
-PERFECT_BONUS = 10
-STREAK_MILESTONE_BONUS = 40
-STREAK_MILESTONE_DAYS = 7
+MATERIAL_PRICE_KSH = int(
+    os.getenv("MATERIAL_PRICE_KSH", "5")
+)
 
 SUBSCRIPTION_PRICE_KSH = int(
     os.getenv("SUBSCRIPTION_PRICE_KSH", "100")
@@ -49,19 +35,28 @@ SUBSCRIPTION_DAYS = int(
     os.getenv("SUBSCRIPTION_DAYS", "30")
 )
 
-ID_PATTERN = re.compile(r"[A-Za-z0-9_:.\\-]{1,120}")
+# Kept for frontend compatibility.
+# Points are now always equal to KSh wallet balance.
+KSH_PER_COIN = 1
+
+ID_PATTERN = re.compile(
+    r"[A-Za-z0-9_:.\\-]{1,120}"
+)
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+MAX_IMPORTED_UNLOCKS = 1000
+
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def covers(grade_key, material_id):
-    """
-    Material IDs start with their grade key.
-
-    Example:
-        cbc-7-english-...
-    """
-    return bool(grade_key) and material_id.startswith(grade_key + "-")
+    return (
+        bool(grade_key)
+        and material_id.startswith(grade_key + "-")
+    )
 
 
 def error(message, status, **extra):
@@ -80,9 +75,9 @@ def create_coins_blueprint(
 ):
     bp = Blueprint("coins", __name__)
 
-    # --------------------------------------------------------
-    # Helpers
-    # --------------------------------------------------------
+    # ========================================================
+    # STUDENT
+    # ========================================================
 
     def find_student(conn, soma_hub_code):
         return conn.execute(
@@ -94,7 +89,14 @@ def create_coins_blueprint(
             (soma_hub_code,),
         ).fetchone()
 
-    def coin_balance(conn, soma_hub_code):
+    # ========================================================
+    # LEGACY COIN BALANCE
+    #
+    # Kept only for backwards compatibility with old database
+    # records. It is NOT used for material payments anymore.
+    # ========================================================
+
+    def legacy_coin_balance(conn, soma_hub_code):
         row = conn.execute(
             """
             SELECT COALESCE(SUM(amount), 0) AS balance
@@ -106,6 +108,12 @@ def create_coins_blueprint(
 
         return int(row["balance"])
 
+    # ========================================================
+    # WALLET BALANCE
+    #
+    # THIS IS NOW THE SOURCE OF TRUTH.
+    # ========================================================
+
     def ksh_balance(conn, soma_hub_code):
         return int(
             round(
@@ -116,22 +124,9 @@ def create_coins_blueprint(
             )
         )
 
-    def earned_today(conn, soma_hub_code):
-        row = conn.execute(
-            """
-            SELECT COALESCE(SUM(amount), 0) AS earned
-            FROM coin_transactions
-            WHERE soma_hub_code = %s
-              AND transaction_type = 'REWARD'
-              AND SUBSTRING(created_at, 1, 10) = %s
-            """,
-            (
-                soma_hub_code,
-                date.today().isoformat(),
-            ),
-        ).fetchone()
-
-        return int(row["earned"])
+    # ========================================================
+    # SUBSCRIPTIONS
+    # ========================================================
 
     def active_subscriptions(conn, soma_hub_code):
         return conn.execute(
@@ -171,11 +166,6 @@ def create_coins_blueprint(
         conn,
         soma_hub_code,
     ):
-        """
-        The student's current-grade subscription,
-        else their latest one.
-        """
-
         grade_row = conn.execute(
             """
             SELECT grade
@@ -185,7 +175,11 @@ def create_coins_blueprint(
             (soma_hub_code,),
         ).fetchone()
 
-        grade = grade_row["grade"] if grade_row else None
+        grade = (
+            grade_row["grade"]
+            if grade_row
+            else None
+        )
 
         row = conn.execute(
             """
@@ -215,6 +209,16 @@ def create_coins_blueprint(
             "active": row["expires_at"] > now_string(),
         }
 
+    # ========================================================
+    # ACCOUNT PAYLOAD
+    #
+    # "coins" is kept in the response because the existing
+    # frontend expects it.
+    #
+    # IMPORTANT:
+    # coins == ksh == actual paid wallet balance.
+    # ========================================================
+
     def account_payload(
         conn,
         soma_hub_code,
@@ -229,6 +233,11 @@ def create_coins_blueprint(
             (soma_hub_code,),
         ).fetchall()
 
+        wallet = ksh_balance(
+            conn,
+            soma_hub_code,
+        )
+
         imported = conn.execute(
             """
             SELECT 1
@@ -241,35 +250,55 @@ def create_coins_blueprint(
         ).fetchone()
 
         return {
-            "coins": coin_balance(
-                conn,
-                soma_hub_code,
-            ),
-            "ksh": ksh_balance(
-                conn,
-                soma_hub_code,
-            ),
+            # Existing frontend field.
+            # It now represents paid wallet balance.
+            "coins": wallet,
+
+            # Actual wallet balance.
+            "ksh": wallet,
+
             "unlocked": [
                 row["material_id"]
                 for row in unlocked
             ],
-            "earned_today": earned_today(
-                conn,
-                soma_hub_code,
-            ),
+
+            # Free earning is disabled.
+            "earned_today": 0,
+
             "imported": bool(imported),
+
             "prices": {
-                "material_coins": MATERIAL_PRICE_COINS,
-                "ksh_per_coin": KSH_PER_COIN,
-                "daily_cap": DAILY_COIN_CAP,
-                "subscription_ksh": SUBSCRIPTION_PRICE_KSH,
-                "subscription_days": SUBSCRIPTION_DAYS,
+                # Kept under the old field name so the current
+                # frontend does not break.
+                "material_coins": MATERIAL_PRICE_KSH,
+
+                # 1 KSh = 1 SOMA Point.
+                "ksh_per_coin": 1,
+
+                # No free reward earning.
+                "daily_cap": 0,
+
+                "subscription_ksh": (
+                    SUBSCRIPTION_PRICE_KSH
+                ),
+
+                "subscription_days": (
+                    SUBSCRIPTION_DAYS
+                ),
             },
+
             "subscription": subscription_summary(
                 conn,
                 soma_hub_code,
             ),
         }
+
+    # ========================================================
+    # LEGACY COIN LEDGER
+    #
+    # Kept so old database records/endpoints do not break.
+    # New real-money balances must NOT be created here.
+    # ========================================================
 
     def add_coins(
         conn,
@@ -303,6 +332,10 @@ def create_coins_blueprint(
             ),
         )
 
+    # ========================================================
+    # WALLET DEBIT
+    # ========================================================
+
     def debit_ksh(
         conn,
         student,
@@ -321,7 +354,15 @@ def create_coins_blueprint(
                 description,
                 created_at
             )
-            VALUES (%s, %s, %s, 'DEBIT', %s, %s, %s)
+            VALUES (
+                %s,
+                %s,
+                %s,
+                'DEBIT',
+                %s,
+                %s,
+                %s
+            )
             """,
             (
                 student["id"],
@@ -333,60 +374,42 @@ def create_coins_blueprint(
             ),
         )
 
+    # ========================================================
+    # LEGACY REFERENCE CHECK
+    # ========================================================
+
     def reference_exists(
         conn,
         reference,
     ):
-        return (
-            conn.execute(
-                """
-                SELECT 1
-                FROM coin_transactions
-                WHERE reference = %s
-                LIMIT 1
-                """,
-                (reference,),
-            ).fetchone()
-            is not None
-        )
-
-    def reward_streak_after_today(
-        conn,
-        soma_hub_code,
-    ):
-        """
-        Consecutive days with a reward,
-        ending today.
-        """
-
-        rows = conn.execute(
+        coin_exists = conn.execute(
             """
-            SELECT DISTINCT
-                SUBSTRING(created_at, 1, 10) AS day
+            SELECT 1
             FROM coin_transactions
-            WHERE soma_hub_code = %s
-              AND transaction_type = 'REWARD'
+            WHERE reference = %s
+            LIMIT 1
             """,
-            (soma_hub_code,),
-        ).fetchall()
+            (reference,),
+        ).fetchone()
 
-        days = {
-            row["day"]
-            for row in rows
-        }
+        if coin_exists:
+            return True
 
-        days.add(
-            date.today().isoformat()
-        )
+        wallet_exists = conn.execute(
+            """
+            SELECT 1
+            FROM wallet_transactions
+            WHERE reference = %s
+            LIMIT 1
+            """,
+            (reference,),
+        ).fetchone()
 
-        streak = 0
-        current_day = date.today()
+        return wallet_exists is not None
 
-        while current_day.isoformat() in days:
-            streak += 1
-            current_day -= timedelta(days=1)
-
-        return streak
+    # ========================================================
+    # REQUEST HELPERS
+    # ========================================================
 
     def read_body():
         data = request.get_json(
@@ -403,11 +426,6 @@ def create_coins_blueprint(
         return data, code
 
     def with_student(handler):
-        """
-        Opens a connection, loads the student,
-        and always closes it.
-        """
-
         def wrapper(*args, **kwargs):
             data, code = read_body()
 
@@ -450,9 +468,9 @@ def create_coins_blueprint(
 
         return wrapper
 
-    # --------------------------------------------------------
-    # Account
-    # --------------------------------------------------------
+    # ========================================================
+    # GET ACCOUNT
+    # ========================================================
 
     @bp.route(
         "/api/account/<soma_hub_code>",
@@ -484,6 +502,16 @@ def create_coins_blueprint(
         finally:
             conn.close()
 
+    # ========================================================
+    # IMPORT OLD LOCAL ACCOUNT DATA
+    #
+    # IMPORTANT:
+    # We DO NOT import old coins.
+    #
+    # We only preserve previously unlocked materials so an
+    # existing student does not lose access.
+    # ========================================================
+
     @bp.route(
         "/api/account/import",
         methods=["POST"],
@@ -494,87 +522,57 @@ def create_coins_blueprint(
         student,
         data,
     ):
-        """
-        One-time move of a device's local
-        coins and unlocks to the server.
-        """
-
         code = student["soma_hub_code"]
-        reference = f"IMPORT-{code}"
 
-        if not reference_exists(
-            conn,
-            reference,
+        unlocked = data.get(
+            "unlocked"
+        ) or []
+
+        if not isinstance(
+            unlocked,
+            list,
         ):
-            try:
-                local_coins = int(
-                    data.get(
-                        "coins",
-                        DEFAULT_STARTING_COINS,
-                    )
-                )
-            except (TypeError, ValueError):
-                local_coins = DEFAULT_STARTING_COINS
+            unlocked = []
 
-            coins = max(
-                0,
-                min(
-                    local_coins,
-                    IMPORT_COIN_CAP,
+        for material_id in unlocked[
+            :MAX_IMPORTED_UNLOCKS
+        ]:
+            material_id = str(
+                material_id
+            ).strip()
+
+            if not ID_PATTERN.fullmatch(
+                material_id
+            ):
+                continue
+
+            conn.execute(
+                """
+                INSERT INTO material_unlocks (
+                    student_id,
+                    soma_hub_code,
+                    material_id,
+                    created_at
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                ON CONFLICT (
+                    student_id,
+                    material_id
+                )
+                DO NOTHING
+                """,
+                (
+                    student["id"],
+                    code,
+                    material_id,
+                    now_string(),
                 ),
             )
-
-            add_coins(
-                conn,
-                student,
-                coins,
-                "IMPORT",
-                reference,
-                "Coins moved from this device",
-            )
-
-            unlocked = data.get(
-                "unlocked"
-            ) or []
-
-            if not isinstance(
-                unlocked,
-                list,
-            ):
-                unlocked = []
-
-            for material_id in unlocked[
-                :MAX_IMPORTED_UNLOCKS
-            ]:
-                material_id = str(
-                    material_id
-                )
-
-                if ID_PATTERN.fullmatch(
-                    material_id
-                ):
-                    conn.execute(
-                        """
-                        INSERT INTO material_unlocks (
-                            student_id,
-                            soma_hub_code,
-                            material_id,
-                            created_at
-                        )
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (
-                            student_id,
-                            material_id
-                        )
-                        DO NOTHING
-                        """,
-                        (
-                            student["id"],
-                            code,
-                            material_id,
-                            now_string(),
-                        ),
-                    )
 
         conn.commit()
 
@@ -586,26 +584,33 @@ def create_coins_blueprint(
             ),
         })
 
-    # --------------------------------------------------------
-    # Unlock a material
-    # --------------------------------------------------------
+    # ========================================================
+    # MATERIAL UNLOCK
+    #
+    # THIS IS THE MAIN ECONOMY CHANGE.
+    #
+    # Example:
+    #
+    # Wallet = KSh 50
+    # Material = KSh 5
+    # After unlock = KSh 45
+    #
+    # SOMA Points therefore also go:
+    #
+    # 50 -> 45
+    # ========================================================
 
     def perform_unlock(
         conn,
         student,
         material_id,
-        allow_ksh,
+        allow_ksh=True,
     ):
-        """
-        Unlocks inside the caller's transaction.
-
-        Returns:
-            (http_status, body)
-
-        The caller commits on success.
-        """
-
         code = student["soma_hub_code"]
+
+        # ----------------------------------------------------
+        # Already unlocked?
+        # ----------------------------------------------------
 
         already = conn.execute(
             """
@@ -628,7 +633,10 @@ def create_coins_blueprint(
                 "ksh_spent": 0,
             }
 
-        # Covered materials open without a permanent unlock.
+        # ----------------------------------------------------
+        # Active subscription?
+        # ----------------------------------------------------
+
         if subscription_covering(
             conn,
             code,
@@ -641,69 +649,82 @@ def create_coins_blueprint(
                 "ksh_spent": 0,
             }
 
-        price = MATERIAL_PRICE_COINS
+        # ----------------------------------------------------
+        # Wallet is the ONLY source of usable points.
+        # ----------------------------------------------------
 
-        coins = coin_balance(
+        price = MATERIAL_PRICE_KSH
+
+        wallet = ksh_balance(
             conn,
             code,
         )
 
-        ksh = ksh_balance(
-            conn,
-            code,
-        )
-
-        if coins >= price:
-            coins_spent = price
-            ksh_spent = 0
-
-        else:
-            shortfall = price - coins
-            ksh_needed = (
-                shortfall * KSH_PER_COIN
-            )
-
-            if (
-                not allow_ksh
-                or ksh < ksh_needed
-            ):
-                return 402, {
-                    "message": "Not enough coins",
-                    "coins": coins,
-                    "ksh": ksh,
-                    "price": price,
-                    "shortfall_coins": shortfall,
-                    "ksh_needed": ksh_needed,
-                    "can_pay_with_ksh": (
-                        ksh >= ksh_needed
-                    ),
-                }
-
-            coins_spent = coins
-            ksh_spent = ksh_needed
+        if wallet < price:
+            return 402, {
+                "message": (
+                    "Not enough balance. "
+                    "Please add funds to your wallet."
+                ),
+                "coins": wallet,
+                "ksh": wallet,
+                "price": price,
+                "shortfall_coins": (
+                    price - wallet
+                ),
+                "ksh_needed": (
+                    price - wallet
+                ),
+                "can_pay_with_ksh": False,
+            }
 
         reference = (
             f"UNLOCK-{code}-{material_id}"
         )
 
-        if ksh_spent:
-            debit_ksh(
-                conn,
-                student,
-                ksh_spent,
-                reference,
-                f"Unlocked {material_id}",
-            )
+        # ----------------------------------------------------
+        # Prevent duplicate debit.
+        # ----------------------------------------------------
 
-        if coins_spent:
-            add_coins(
-                conn,
-                student,
-                -coins_spent,
-                "UNLOCK",
-                reference,
-                f"Unlocked {material_id}",
-            )
+        existing_payment = conn.execute(
+            """
+            SELECT 1
+            FROM wallet_transactions
+            WHERE reference = %s
+              AND transaction_type = 'DEBIT'
+            LIMIT 1
+            """,
+            (reference,),
+        ).fetchone()
+
+        if existing_payment:
+            return 200, {
+                "already_unlocked": True,
+                "via_subscription": False,
+                "coins_spent": 0,
+                "ksh_spent": 0,
+            }
+
+        # ----------------------------------------------------
+        # Deduct REAL wallet balance.
+        # ----------------------------------------------------
+
+        debit_ksh(
+            conn,
+            student,
+            price,
+            reference,
+            f"Unlocked {material_id}",
+        )
+
+        # ----------------------------------------------------
+        # Record the unlock.
+        #
+        # coins_spent = price because SOMA Points mirror
+        # the wallet balance 1:1.
+        #
+        # ksh_spent = actual money deducted.
+        # ----------------------------------------------------
 
         conn.execute(
             """
@@ -715,14 +736,26 @@ def create_coins_blueprint(
                 ksh_spent,
                 created_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            ON CONFLICT (
+                student_id,
+                material_id
+            )
+            DO NOTHING
             """,
             (
                 student["id"],
                 code,
                 material_id,
-                coins_spent,
-                ksh_spent,
+                price,
+                price,
                 now_string(),
             ),
         )
@@ -730,26 +763,19 @@ def create_coins_blueprint(
         return 200, {
             "already_unlocked": False,
             "via_subscription": False,
-            "coins_spent": coins_spent,
-            "ksh_spent": ksh_spent,
+            "coins_spent": price,
+            "ksh_spent": price,
         }
 
-    # --------------------------------------------------------
-    # Subscriptions
-    # --------------------------------------------------------
+    # ========================================================
+    # SUBSCRIPTION
+    # ========================================================
 
     def perform_subscribe(
         conn,
         student,
         reference,
     ):
-        """
-        Subscribes inside the caller's transaction.
-
-        Returns:
-            (http_status, body)
-        """
-
         code = student["soma_hub_code"]
 
         grade_key = (
@@ -778,25 +804,26 @@ def create_coins_blueprint(
                 "ksh_spent": 0,
             }
 
-        ksh = ksh_balance(
+        wallet = ksh_balance(
             conn,
             code,
         )
 
-        if ksh < SUBSCRIPTION_PRICE_KSH:
+        if wallet < SUBSCRIPTION_PRICE_KSH:
             return 402, {
                 "message": (
                     "Not enough KSh in your wallet"
                 ),
-                "ksh": ksh,
+                "ksh": wallet,
                 "ksh_needed": (
-                    SUBSCRIPTION_PRICE_KSH - ksh
+                    SUBSCRIPTION_PRICE_KSH
+                    - wallet
                 ),
-                "price_ksh": SUBSCRIPTION_PRICE_KSH,
+                "price_ksh": (
+                    SUBSCRIPTION_PRICE_KSH
+                ),
             }
 
-        # Renewing early extends from the current
-        # subscription end date.
         current = conn.execute(
             """
             SELECT MAX(expires_at) AS expires_at
@@ -852,7 +879,16 @@ def create_coins_blueprint(
                 reference,
                 created_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
             """,
             (
                 student["id"],
@@ -868,8 +904,14 @@ def create_coins_blueprint(
 
         return 200, {
             "duplicate": False,
-            "ksh_spent": SUBSCRIPTION_PRICE_KSH,
+            "ksh_spent": (
+                SUBSCRIPTION_PRICE_KSH
+            ),
         }
+
+    # ========================================================
+    # COMMON RESPONSE
+    # ========================================================
 
     def respond(
         conn,
@@ -896,9 +938,9 @@ def create_coins_blueprint(
             **body,
         }), status
 
-    # --------------------------------------------------------
-    # Unlock a material
-    # --------------------------------------------------------
+    # ========================================================
+    # UNLOCK MATERIAL
+    # ========================================================
 
     @bp.route(
         "/api/unlocks",
@@ -917,10 +959,6 @@ def create_coins_blueprint(
             )
         ).strip()
 
-        allow_ksh = (
-            data.get("allow_ksh") is True
-        )
-
         if not ID_PATTERN.fullmatch(
             material_id
         ):
@@ -933,7 +971,7 @@ def create_coins_blueprint(
             conn,
             student,
             material_id,
-            allow_ksh,
+            allow_ksh=True,
         )
 
         return respond(
@@ -943,9 +981,9 @@ def create_coins_blueprint(
             body,
         )
 
-    # --------------------------------------------------------
-    # Subscriptions
-    # --------------------------------------------------------
+    # ========================================================
+    # SUBSCRIBE
+    # ========================================================
 
     @bp.route(
         "/api/subscriptions",
@@ -985,9 +1023,12 @@ def create_coins_blueprint(
             body,
         )
 
-    # --------------------------------------------------------
-    # Buy coins with KSh
-    # --------------------------------------------------------
+    # ========================================================
+    # OLD BUY-COINS ENDPOINT
+    #
+    # Coins are no longer purchased separately.
+    # Money goes directly into the wallet and becomes points.
+    # ========================================================
 
     @bp.route(
         "/api/coins/buy",
@@ -999,108 +1040,24 @@ def create_coins_blueprint(
         student,
         data,
     ):
-        code = student["soma_hub_code"]
+        conn.rollback()
 
-        request_id = str(
-            data.get(
-                "request_id",
-                "",
-            )
-        ).strip()
-
-        if not ID_PATTERN.fullmatch(
-            request_id
-        ):
-            return error(
-                "A request ID is required",
-                400,
-            )
-
-        coins = data.get("coins")
-
-        if (
-            not isinstance(coins, int)
-            or isinstance(coins, bool)
-            or not (
-                1 <= coins <= MAX_COINS_PER_PURCHASE
-            )
-        ):
-            return error(
-                (
-                    "Coins must be a whole number "
-                    f"from 1 to {MAX_COINS_PER_PURCHASE}"
-                ),
-                400,
-            )
-
-        reference = f"BUY-{request_id}"
-
-        if reference_exists(
-            conn,
-            reference,
-        ):
-            conn.commit()
-
-            return jsonify({
-                "success": True,
-                "duplicate": True,
-                **account_payload(
-                    conn,
-                    code,
-                ),
-            })
-
-        ksh_cost = (
-            coins * KSH_PER_COIN
-        )
-
-        ksh = ksh_balance(
-            conn,
-            code,
-        )
-
-        if ksh < ksh_cost:
-            conn.rollback()
-
-            return error(
-                "Not enough KSh in your wallet",
-                402,
-                ksh=ksh,
-                ksh_needed=ksh_cost,
-            )
-
-        debit_ksh(
-            conn,
-            student,
-            ksh_cost,
-            reference,
-            f"Bought {coins} coins",
-        )
-
-        add_coins(
-            conn,
-            student,
-            coins,
-            "PURCHASE",
-            reference,
-            f"Bought {coins} coins",
-        )
-
-        conn.commit()
-
-        return jsonify({
-            "success": True,
-            "duplicate": False,
-            "ksh_spent": ksh_cost,
-            **account_payload(
-                conn,
-                code,
+        return error(
+            (
+                "Buying SOMA Coins separately is no longer "
+                "available. Add funds to your wallet instead."
             ),
-        })
+            410,
+        )
 
-    # --------------------------------------------------------
-    # Quiz rewards
-    # --------------------------------------------------------
+    # ========================================================
+    # OLD QUIZ REWARD ENDPOINT
+    #
+    # No free points are awarded for quizzes anymore.
+    #
+    # Return success so the existing quiz flow does not
+    # break if it still calls this endpoint.
+    # ========================================================
 
     @bp.route(
         "/api/coins/reward",
@@ -1112,167 +1069,25 @@ def create_coins_blueprint(
         student,
         data,
     ):
-        code = student["soma_hub_code"]
-
-        attempt_id = str(
-            data.get(
-                "attempt_id",
-                "",
-            )
-        ).strip()
-
-        material_id = str(
-            data.get(
-                "material_id",
-                "",
-            )
-        ).strip()
-
-        quiz_type = data.get("type")
-        percentage = data.get("percentage")
-
-        if not ID_PATTERN.fullmatch(
-            attempt_id
-        ):
-            return error(
-                "An attempt ID is required",
-                400,
-            )
-
-        if not ID_PATTERN.fullmatch(
-            material_id
-        ):
-            return error(
-                "A valid material ID is required",
-                400,
-            )
-
-        if quiz_type not in REWARD_BASE:
-            return error(
-                "Type must be 'topical' or 'exam'",
-                400,
-            )
-
-        if (
-            not isinstance(
-                percentage,
-                (int, float),
-            )
-            or isinstance(
-                percentage,
-                bool,
-            )
-            or not 0 <= percentage <= 100
-        ):
-            return error(
-                "Percentage must be between 0 and 100",
-                400,
-            )
-
-        reference = (
-            f"REWARD-{code}-{attempt_id}"
-        )
-
-        if reference_exists(
-            conn,
-            reference,
-        ):
-            conn.commit()
-
-            return jsonify({
-                "success": True,
-                "duplicate": True,
-                "coins_awarded": 0,
-                **account_payload(
-                    conn,
-                    code,
-                ),
-            })
-
-        first_reward_today = (
-            conn.execute(
-                """
-                SELECT 1
-                FROM coin_transactions
-                WHERE soma_hub_code = %s
-                  AND transaction_type = 'REWARD'
-                  AND SUBSTRING(created_at, 1, 10) = %s
-                LIMIT 1
-                """,
-                (
-                    code,
-                    date.today().isoformat(),
-                ),
-            ).fetchone()
-            is None
-        )
-
-        reward = REWARD_BASE[
-            quiz_type
-        ]
-
-        if percentage >= 100:
-            reward += PERFECT_BONUS
-
-        streak = reward_streak_after_today(
-            conn,
-            code,
-        )
-
-        milestone = (
-            first_reward_today
-            and streak % STREAK_MILESTONE_DAYS == 0
-        )
-
-        if milestone:
-            reward += STREAK_MILESTONE_BONUS
-
-        remaining = max(
-            0,
-            DAILY_COIN_CAP
-            - earned_today(
-                conn,
-                code,
-            ),
-        )
-
-        awarded = min(
-            reward,
-            remaining,
-        )
-
-        description = (
-            f"Quiz reward + {streak}-day streak"
-            if milestone
-            else "Quiz reward"
-        )
-
-        add_coins(
-            conn,
-            student,
-            awarded,
-            "REWARD",
-            reference,
-            description,
-        )
-
-        conn.commit()
-
         return jsonify({
             "success": True,
-            "duplicate": False,
-            "coins_awarded": awarded,
-            "capped": awarded < reward,
-            "streak_bonus": milestone,
+            "reward_disabled": True,
+            "coins_awarded": 0,
+            "message": (
+                "SOMA Points come from paid wallet funds."
+            ),
             **account_payload(
                 conn,
-                code,
+                student["soma_hub_code"],
             ),
         })
 
-    # --------------------------------------------------------
-    # Development coins
-    # --------------------------------------------------------
+    # ========================================================
+    # DEVELOPMENT GRANT
+    #
+    # Disabled completely because points must come from
+    # actual paid wallet funds.
+    # ========================================================
 
     @bp.route(
         "/api/dev/grant-coins",
@@ -1284,51 +1099,37 @@ def create_coins_blueprint(
         student,
         data,
     ):
-        if not is_sandbox():
-            return error(
-                "Development coins are disabled in production",
-                403,
-            )
+        conn.rollback()
 
-        add_coins(
-            conn,
-            student,
-            100,
-            "DEV_GRANT",
-            f"DEV-{uuid.uuid4().hex}",
-            "Development test coins",
+        return error(
+            (
+                "Free development points are disabled. "
+                "SOMA Points come from paid wallet funds."
+            ),
+            403,
         )
 
-        conn.commit()
-
-        return jsonify({
-            "success": True,
-            **account_payload(
-                conn,
-                student["soma_hub_code"],
-            ),
-        })
-
-    # --------------------------------------------------------
-    # Payment purposes
-    # --------------------------------------------------------
+    # ========================================================
+    # PAYMENT PURPOSE FULFILMENT
+    #
+    # Called after a successful payment.
+    #
+    # For a material unlock:
+    #
+    # payment -> wallet CREDIT
+    #          -> perform_unlock()
+    #          -> wallet DEBIT
+    #
+    # For subscription:
+    #
+    # payment -> wallet CREDIT
+    #          -> perform_subscribe()
+    #          -> wallet DEBIT
+    # ========================================================
 
     def fulfil_payment_purpose(
         session_id,
     ):
-        """
-        Runs after an M-Pesa payment has been
-        credited to the wallet.
-
-        Unlocks the material or starts the subscription
-        the payment was for.
-
-        On failure the money simply stays in the wallet.
-
-        Returns the saved purpose_result,
-        or None for plain top-ups.
-        """
-
         conn = get_db()
 
         try:
@@ -1369,11 +1170,15 @@ def create_coins_blueprint(
                     f"SUB-{session_id}",
                 )
 
-            elif purpose.startswith("unlock:"):
+            elif purpose.startswith(
+                "unlock:"
+            ):
                 status, body = perform_unlock(
                     conn,
                     student,
-                    purpose[len("unlock:"):],
+                    purpose[
+                        len("unlock:"):
+                    ],
                     allow_ksh=True,
                 )
 
@@ -1430,16 +1235,30 @@ def create_coins_blueprint(
     return bp
 
 
+# ============================================================
+# PAYMENT PURPOSE VALIDATION
+# ============================================================
+
 def is_valid_purpose(purpose):
-    if purpose is None or purpose == "subscribe":
+    if purpose is None:
+        return True
+
+    if purpose == "subscribe":
         return True
 
     return (
-        isinstance(purpose, str)
-        and purpose.startswith("unlock:")
+        isinstance(
+            purpose,
+            str,
+        )
+        and purpose.startswith(
+            "unlock:"
+        )
         and bool(
             ID_PATTERN.fullmatch(
-                purpose[len("unlock:"):]
+                purpose[
+                    len("unlock:"):
+                ]
             )
         )
     )

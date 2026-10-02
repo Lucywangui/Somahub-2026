@@ -1,4 +1,5 @@
 import { create } from "zustand";
+
 import type { Question } from "@/data/questions";
 import type { Pathway } from "@/data/curriculum";
 
@@ -51,7 +52,7 @@ export interface Subscription {
 const DEFAULT_PRICES: Prices = {
   materialCoins: 5,
   kshPerCoin: 1,
-  dailyCap: 200,
+  dailyCap: 0,
   subscriptionKsh: 100,
   subscriptionDays: 30,
 };
@@ -133,11 +134,8 @@ export const TERM_POINT_LIMITS: Record<
 };
 
 export const STUDY_NOTES_POINTS_PER_COMPLETION = 2;
-
 export const TOPICAL_QUIZ_TERM_POINTS = 5;
-
 export const EXAM_TERM_POINTS = 8;
-
 export const CONSISTENCY_TERM_POINTS = 2;
 
 /**
@@ -146,7 +144,6 @@ export const CONSISTENCY_TERM_POINTS = 2;
  * in quiz/exam performance earns 1 progress point.
  */
 export const PROGRESS_PERCENTAGE_STEP = 5;
-
 export const PROGRESS_POINTS_PER_STEP = 1;
 
 export const MAX_TERM_POINTS = 100;
@@ -157,10 +154,10 @@ export function getTermPointsTotal(
   return Math.min(
     MAX_TERM_POINTS,
     termPoints.studyNotes +
-    termPoints.topicalQuizzes +
-    termPoints.exams +
-    termPoints.consistency +
-    termPoints.progress
+      termPoints.topicalQuizzes +
+      termPoints.exams +
+      termPoints.consistency +
+      termPoints.progress
   );
 }
 
@@ -208,29 +205,7 @@ function createEmptyTermPoints(
 }
 
 /* =========================================================
-   REWARDS
-   ========================================================= */
-
-const COINS_PER_TOPICAL = 15;
-const COINS_PER_EXAM = 25;
-const PERFECT_BONUS = 10;
-const STREAK_MILESTONE_BONUS = 40;
-
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function daysBetween(
-  a: string,
-  b: string
-): number {
-  return Math.round(
-    (Date.parse(b) - Date.parse(a)) / 86400000
-  );
-}
-
-/* =========================================================
-   SOMA HUB STUDENT CODE
+   STUDENT CODE
    ========================================================= */
 
 function generateSomaHubCode(): string {
@@ -287,8 +262,8 @@ export const SOMA_API_BASE_URL =
   (
     import.meta.env
       .VITE_API_BASE_URL as
-    | string
-    | undefined
+      | string
+      | undefined
   )?.replace(/\/$/, "") ||
   "http://127.0.0.1:5000";
 
@@ -311,7 +286,6 @@ export async function syncStudentToBackend(data: {
       "[SOMA HUB] Sync skipped because SOMA HUB Code or name is missing:",
       data
     );
-
     return;
   }
 
@@ -321,12 +295,10 @@ export async function syncStudentToBackend(data: {
         `${SOMA_API_BASE_URL}/api/students/register`,
         {
           method: "POST",
-
           headers: {
             "Content-Type":
               "application/json",
           },
-
           body: JSON.stringify(data),
         }
       );
@@ -363,11 +335,13 @@ export async function syncStudentToBackend(data: {
    PERFORMANCE BACKEND SYNCHRONIZATION
    ========================================================= */
 
-async function syncStudentPerformanceToBackend(data: {
-  soma_hub_code: string;
-  term_points: TermPoints[];
-  quiz_results: QuizResult[];
-}): Promise<void> {
+async function syncStudentPerformanceToBackend(
+  data: {
+    soma_hub_code: string;
+    term_points: TermPoints[];
+    quiz_results: QuizResult[];
+  }
+): Promise<void> {
   console.log(
     "[SOMA HUB] Starting performance sync:",
     data
@@ -377,7 +351,6 @@ async function syncStudentPerformanceToBackend(data: {
     console.warn(
       "[SOMA HUB] Performance sync skipped because SOMA HUB Code is missing."
     );
-
     return;
   }
 
@@ -386,11 +359,10 @@ async function syncStudentPerformanceToBackend(data: {
       `${SOMA_API_BASE_URL}/api/students/performance`,
       {
         method: "POST",
-
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type":
+            "application/json",
         },
-
         body: JSON.stringify({
           soma_hub_code:
             data.soma_hub_code,
@@ -493,33 +465,38 @@ interface SomaState {
   avatar: string | null;
   grade: string | null;
   schoolName: string | null;
-
   somaHubCode: string;
-
   studyIntent: StudyIntent | null;
-
   pathway: Pathway | null;
-
   activeGrade: string | null;
 
-  /** Coin balance; a cache of the server account. */
+  /**
+   * SOMA Points.
+   *
+   * These are now exactly equal to the real-money wallet
+   * balance reported by the server.
+   */
   wallet: number;
-  /** M-Pesa wallet in KSh; null until the server has answered. */
+
+  /** Real wallet balance in KSh. */
   ksh: number | null;
+
   prices: Prices;
   subscription: Subscription | null;
+
   xp: number;
   streak: Streak;
   dailyGoal: number;
 
-  /** Unlocked materials shown in the library (server unlocks minus hidden). */
+  /** Unlocked materials shown in the library. */
   purchased: string[];
-  /** Unlocked materials the student removed from their library. */
+
+  /** Unlocked materials hidden from the library. */
   libraryHidden: string[];
+
   transactions: Transaction[];
   quizResults: QuizResult[];
   quizProgress: Record<string, QuizProgress>;
-
   termPoints: Record<string, TermPoints>;
 
   studyNotesCompleted: Record<
@@ -530,18 +507,23 @@ interface SomaState {
   setName: (name: string) => void;
   setAvatar: (avatar: string) => void;
   setGrade: (grade: string) => void;
+
   setSchoolName: (
     schoolName: string
   ) => void;
+
   setStudyIntent: (
     intent: StudyIntent
   ) => void;
+
   setPathway: (
     pathway: Pathway | null
   ) => void;
+
   setActiveGrade: (
     grade: string | null
   ) => void;
+
   setDailyGoal: (n: number) => void;
 
   addTermPoints: (
@@ -557,7 +539,6 @@ interface SomaState {
     account: ServerAccount
   ) => void;
 
-  /** Puts an unlocked material back in the library after it was removed. */
   showInLibrary: (
     id: string
   ) => void;
@@ -680,14 +661,15 @@ export const useSomaStore =
      * synchronize that existing account with Flask.
      *
      * This does NOT create a new SOMA HUB Code.
-     * It sends the existing locally stored code.
      */
+
     if (initialName) {
       void syncStudentToBackend({
         soma_hub_code:
           initialSomaHubCode,
 
-        name: initialName,
+        name:
+          initialName,
 
         school_name:
           initialSchoolName ?? "",
@@ -700,14 +682,16 @@ export const useSomaStore =
     return {
       name: initialName,
 
-      avatar: loadState<string | null>(
-        "soma_avatar",
-        null
-      ),
+      avatar:
+        loadState<string | null>(
+          "soma_avatar",
+          null
+        ),
 
       grade: initialGrade,
 
-      schoolName: initialSchoolName,
+      schoolName:
+        initialSchoolName,
 
       somaHubCode:
         initialSomaHubCode,
@@ -730,37 +714,49 @@ export const useSomaStore =
           null
         ),
 
+      /*
+       * IMPORTANT:
+       * No free starting points.
+       *
+       * The server will supply the real paid balance.
+       */
       wallet: loadState<number>(
         "soma_wallet",
-        100
-      ),
-
-      ksh: loadState<number | null>(
-        "soma_ksh",
-        null
-      ),
-
-      prices: DEFAULT_PRICES,
-
-      subscription: loadState<Subscription | null>(
-        "soma_subscription",
-        null
-      ),
-
-      xp: loadState<number>(
-        "soma_xp",
         0
       ),
 
-      streak: loadState<Streak>(
-        "soma_streak",
-        EMPTY_STREAK
-      ),
+      ksh:
+        loadState<number | null>(
+          "soma_ksh",
+          null
+        ),
 
-      dailyGoal: loadState<number>(
-        "soma_daily_goal",
-        2
-      ),
+      prices:
+        DEFAULT_PRICES,
+
+      subscription:
+        loadState<Subscription | null>(
+          "soma_subscription",
+          null
+        ),
+
+      xp:
+        loadState<number>(
+          "soma_xp",
+          0
+        ),
+
+      streak:
+        loadState<Streak>(
+          "soma_streak",
+          EMPTY_STREAK
+        ),
+
+      dailyGoal:
+        loadState<number>(
+          "soma_daily_goal",
+          2
+        ),
 
       purchased:
         loadState<string[]>(
@@ -815,7 +811,10 @@ export const useSomaStore =
          ===================================================== */
 
       setName: (name) => {
-        save("soma_name", name);
+        save(
+          "soma_name",
+          name
+        );
 
         set({ name });
 
@@ -836,7 +835,10 @@ export const useSomaStore =
       },
 
       setAvatar: (avatar) => {
-        save("soma_avatar", avatar);
+        save(
+          "soma_avatar",
+          avatar
+        );
 
         set({ avatar });
       },
@@ -883,7 +885,9 @@ export const useSomaStore =
           schoolName
         );
 
-        set({ schoolName });
+        set({
+          schoolName,
+        });
 
         const state = get();
 
@@ -912,7 +916,9 @@ export const useSomaStore =
           studyIntent
         );
 
-        set({ studyIntent });
+        set({
+          studyIntent,
+        });
       },
 
       setPathway: (
@@ -923,7 +929,9 @@ export const useSomaStore =
           pathway
         );
 
-        set({ pathway });
+        set({
+          pathway,
+        });
       },
 
       setActiveGrade: (
@@ -934,7 +942,9 @@ export const useSomaStore =
           activeGrade
         );
 
-        set({ activeGrade });
+        set({
+          activeGrade,
+        });
       },
 
       setDailyGoal: (
@@ -945,7 +955,9 @@ export const useSomaStore =
           dailyGoal
         );
 
-        set({ dailyGoal });
+        set({
+          dailyGoal,
+        });
       },
 
       /* =====================================================
@@ -976,7 +988,7 @@ export const useSomaStore =
 
         const existing =
           state.termPoints[
-          termKey
+            termKey
           ] ??
           createEmptyTermPoints(
             year,
@@ -985,7 +997,7 @@ export const useSomaStore =
 
         const categoryLimit =
           TERM_POINT_LIMITS[
-          category
+            category
           ];
 
         const currentCategoryValue =
@@ -1010,7 +1022,7 @@ export const useSomaStore =
           Math.min(
             amount,
             categoryLimit -
-            currentCategoryValue,
+              currentCategoryValue,
             availableOverall
           );
 
@@ -1022,12 +1034,12 @@ export const useSomaStore =
 
         const updatedTerm:
           TermPoints = {
-          ...existing,
+            ...existing,
 
-          [category]:
-            currentCategoryValue +
-            pointsToAdd,
-        };
+            [category]:
+              currentCategoryValue +
+              pointsToAdd,
+          };
 
         const termPoints = {
           ...state.termPoints,
@@ -1045,7 +1057,8 @@ export const useSomaStore =
           termPoints,
         });
 
-        const latestState = get();
+        const latestState =
+          get();
 
         void syncStudentPerformanceToBackend({
           soma_hub_code:
@@ -1087,7 +1100,7 @@ export const useSomaStore =
 
         const completedForTerm =
           state.studyNotesCompleted[
-          termKey
+            termKey
           ] ?? [];
 
         if (
@@ -1110,12 +1123,13 @@ export const useSomaStore =
             materialId,
           ];
 
-        const studyNotesCompleted = {
-          ...state.studyNotesCompleted,
+        const studyNotesCompleted =
+          {
+            ...state.studyNotesCompleted,
 
-          [termKey]:
-            updatedCompletedForTerm,
-        };
+            [termKey]:
+              updatedCompletedForTerm,
+          };
 
         save(
           "soma_study_notes_completed",
@@ -1126,7 +1140,8 @@ export const useSomaStore =
           studyNotesCompleted,
         });
 
-        const latestState = get();
+        const latestState =
+          get();
 
         void syncStudentPerformanceToBackend({
           soma_hub_code:
@@ -1145,7 +1160,7 @@ export const useSomaStore =
       },
 
       /* =====================================================
-         WALLET
+         WALLET / PAID SOMA POINTS
          ===================================================== */
 
       applyAccount: (
@@ -1153,37 +1168,74 @@ export const useSomaStore =
       ) => {
         set((state) => {
           const unlocked =
-            new Set(account.unlocked);
+            new Set(
+              account.unlocked
+            );
 
           const libraryHidden =
             state.libraryHidden.filter(
-              (id) => unlocked.has(id)
+              (id) =>
+                unlocked.has(id)
             );
 
           const purchased =
             account.unlocked.filter(
               (id) =>
-                !libraryHidden.includes(id)
+                !libraryHidden.includes(
+                  id
+                )
             );
 
-          save("soma_wallet", account.coins);
-          save("soma_ksh", account.ksh);
+          /*
+           * IMPORTANT:
+           *
+           * account.coins is now the server's paid wallet
+           * balance.
+           *
+           * Example:
+           * KSh 50 paid -> wallet 50 -> SOMA Points 50
+           */
+
+          save(
+            "soma_wallet",
+            account.coins
+          );
+
+          save(
+            "soma_ksh",
+            account.ksh
+          );
+
           save(
             "soma_subscription",
             account.subscription
           );
-          save("soma_purchased", purchased);
+
+          save(
+            "soma_purchased",
+            purchased
+          );
+
           save(
             "soma_library_hidden",
             libraryHidden
           );
 
           return {
-            wallet: account.coins,
-            ksh: account.ksh,
-            prices: account.prices,
-            subscription: account.subscription,
+            wallet:
+              account.coins,
+
+            ksh:
+              account.ksh,
+
+            prices:
+              account.prices,
+
+            subscription:
+              account.subscription,
+
             purchased,
+
             libraryHidden,
           };
         });
@@ -1194,14 +1246,17 @@ export const useSomaStore =
       ) => {
         set((state) => {
           if (
-            !state.libraryHidden.includes(id)
+            !state.libraryHidden.includes(
+              id
+            )
           ) {
             return state;
           }
 
           const libraryHidden =
             state.libraryHidden.filter(
-              (hidden) => hidden !== id
+              (hidden) =>
+                hidden !== id
             );
 
           const purchased = [
@@ -1230,8 +1285,12 @@ export const useSomaStore =
         id
       ) => {
         set((state) => {
-          // Unlocks live on the server, so removing only hides
-          // the material. Opening it again costs nothing.
+          /*
+           * Unlocks live on the server.
+           * Removing only hides the material.
+           * Opening it again costs nothing.
+           */
+
           const purchased =
             state.purchased.filter(
               (p) => p !== id
@@ -1262,7 +1321,11 @@ export const useSomaStore =
       },
 
       /* =====================================================
-         QUIZ RESULTS + REWARDS
+         QUIZ RESULTS
+         
+         IMPORTANT:
+         Quiz activity still gives XP and learning/term points.
+         It DOES NOT create SOMA Points or wallet money.
          ===================================================== */
 
       addQuizResult: (
@@ -1309,30 +1372,11 @@ export const useSomaStore =
           t;
 
         /* -----------------------------------------------
-           COINS + XP
+           XP
+           
+           Quiz results still earn XP.
+           They do NOT earn paid SOMA Points.
            ----------------------------------------------- */
-
-        const base =
-          result.type === "exam"
-            ? COINS_PER_EXAM
-            : COINS_PER_TOPICAL;
-
-        const perfect =
-          result.percentage >= 100
-            ? PERFECT_BONUS
-            : 0;
-
-        const milestone =
-          streak.count >
-            previousStreakCount &&
-            streak.count % 7 === 0
-            ? STREAK_MILESTONE_BONUS
-            : 0;
-
-        const coinsEarned =
-          base +
-          perfect +
-          milestone;
 
         const xpEarned =
           Math.round(
@@ -1342,61 +1386,52 @@ export const useSomaStore =
             ? 15
             : 8);
 
+        /*
+         * SOMA Points earned from quizzes are now ALWAYS 0.
+         *
+         * The field remains because existing screens/types
+         * may still use it.
+         */
+
+        const coinsEarned = 0;
+
         /* -----------------------------------------------
            NEW QUIZ RESULT
            ----------------------------------------------- */
 
         const newResult:
           QuizResult = {
-          ...result,
+            ...result,
 
-          xpEarned,
+            xpEarned,
 
-          coinsEarned,
+            coinsEarned,
 
-          id: Math.random()
-            .toString(36)
-            .slice(2, 9),
+            id: Math.random()
+              .toString(36)
+              .slice(2, 9),
 
-          date:
-            new Date().toISOString(),
-        };
+            date:
+              new Date().toISOString(),
+          };
 
         const quizResults = [
           newResult,
           ...state.quizResults,
         ].slice(0, 200);
 
-        // Coins are credited by the server (see claimReward in
-        // lib/account.ts); coinsEarned is only for the result screen.
-
         const xp =
           state.xp +
           xpEarned;
 
-        const transactions = [
-          {
-            id: Math.random()
-              .toString(36)
-              .slice(2, 9),
+        /*
+         * Do not create fake reward transactions.
+         *
+         * Existing transaction history is preserved.
+         */
 
-            type:
-              "reward" as const,
-
-            amount:
-              coinsEarned,
-
-            description:
-              milestone
-                ? `Quiz reward + ${streak.count}-day streak!`
-                : "Quiz reward",
-
-            date:
-              new Date().toISOString(),
-          },
-
-          ...state.transactions,
-        ].slice(0, 100);
+        const transactions =
+          state.transactions;
 
         /* =================================================
            TERM LEARNING POINTS
@@ -1413,7 +1448,7 @@ export const useSomaStore =
 
         const existingTerm =
           state.termPoints[
-          termKey
+            termKey
           ] ??
           createEmptyTermPoints(
             year,
@@ -1436,12 +1471,12 @@ export const useSomaStore =
 
         const categoryLimit =
           TERM_POINT_LIMITS[
-          category
+            category
           ];
 
         const currentCategory =
           existingTerm[
-          category
+            category
           ];
 
         const currentTotal =
@@ -1464,7 +1499,7 @@ export const useSomaStore =
             Math.min(
               requestedPoints,
               categoryLimit -
-              currentCategory,
+                currentCategory,
               availableOverall
             )
           );
@@ -1483,7 +1518,7 @@ export const useSomaStore =
           };
         } else if (
           !termPoints[
-          termKey
+            termKey
           ]
         ) {
           termPoints[
@@ -1497,16 +1532,16 @@ export const useSomaStore =
 
         const isNewStreakDay =
           streak.lastActiveDate ===
-          t &&
+            t &&
           streak.count >
-          previousStreakCount;
+            previousStreakCount;
 
         if (
           isNewStreakDay
         ) {
           const updatedTerm =
             termPoints[
-            termKey
+              termKey
             ] ??
             createEmptyTermPoints(
               year,
@@ -1568,25 +1603,25 @@ export const useSomaStore =
 
               return (
                 resultTerm.year ===
-                year &&
+                  year &&
                 resultTerm.term ===
-                term
+                  term
               );
             }
           );
 
         const previousPerformance =
           previousTermResults.length >
-            0
+          0
             ? previousTermResults[0]
-              .percentage
+                .percentage
             : null;
 
         if (
           previousPerformance !==
-          null &&
+            null &&
           result.percentage >
-          previousPerformance
+            previousPerformance
         ) {
           const improvement =
             result.percentage -
@@ -1595,7 +1630,7 @@ export const useSomaStore =
           const progressPointsEarned =
             Math.floor(
               improvement /
-              PROGRESS_PERCENTAGE_STEP
+                PROGRESS_PERCENTAGE_STEP
             ) *
             PROGRESS_POINTS_PER_STEP;
 
@@ -1604,7 +1639,7 @@ export const useSomaStore =
           ) {
             const updatedTerm =
               termPoints[
-              termKey
+                termKey
               ] ??
               createEmptyTermPoints(
                 year,
@@ -1685,7 +1720,8 @@ export const useSomaStore =
           termPoints,
         });
 
-        const latestState = get();
+        const latestState =
+          get();
 
         void syncStudentPerformanceToBackend({
           soma_hub_code:
@@ -1743,7 +1779,7 @@ export const useSomaStore =
         set((state) => {
           if (
             !state.quizProgress[
-            materialId
+              materialId
             ]
           ) {
             return state;
@@ -1787,21 +1823,34 @@ export const useSomaStore =
 
         set({
           name: null,
+
           avatar: null,
+
           grade: null,
+
           schoolName: null,
 
           somaHubCode:
             generateSomaHubCode(),
 
           studyIntent: null,
+
           pathway: null,
+
           activeGrade: null,
 
-          wallet: 100,
+          /*
+           * No free starting balance after logout.
+           */
+          wallet: 0,
+
           ksh: null,
-          prices: DEFAULT_PRICES,
+
+          prices:
+            DEFAULT_PRICES,
+
           subscription: null,
+
           xp: 0,
 
           streak: {
@@ -1811,9 +1860,13 @@ export const useSomaStore =
           dailyGoal: 2,
 
           purchased: [],
+
           libraryHidden: [],
+
           transactions: [],
+
           quizResults: [],
+
           quizProgress: {},
 
           termPoints: {},
