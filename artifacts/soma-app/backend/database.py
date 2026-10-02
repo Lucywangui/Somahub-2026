@@ -86,10 +86,32 @@ def init_database():
                 soma_hub_code TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL,
                 school_name TEXT,
+                school TEXT,
                 grade TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
+            """
+        )
+
+        # Existing databases may already have the students table without
+        # the newer "school" column. Add it safely without deleting data.
+        connection.execute(
+            """
+            ALTER TABLE students
+            ADD COLUMN IF NOT EXISTS school TEXT
+            """
+        )
+
+        # Preserve existing school names when upgrading from the older
+        # school_name column to the newer school column.
+        connection.execute(
+            """
+            UPDATE students
+            SET school = school_name
+            WHERE (school IS NULL OR school = '')
+              AND school_name IS NOT NULL
+              AND school_name <> ''
             """
         )
 
@@ -367,6 +389,10 @@ def init_database():
 
     finally:
         connection.close()
+
+
+# Compatibility alias for code that expects database.init_db().
+init_db = init_database
 
 
 if __name__ == "__main__":
