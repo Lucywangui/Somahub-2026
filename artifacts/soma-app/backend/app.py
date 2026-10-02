@@ -275,6 +275,33 @@ def get_intasend_service():
 
 
 def extract_intasend_invoice_id(response):
+    """
+    Extract the IntaSend invoice identifier from the
+    different response structures returned by the SDK/API.
+
+    Supported examples:
+
+        {
+            "invoice_id": "ABC123"
+        }
+
+    or:
+
+        {
+            "invoice": {
+                "invoice_id": "ABC123"
+            }
+        }
+
+    or:
+
+        {
+            "invoice": {
+                "id": "ABC123"
+            }
+        }
+    """
+
     if not isinstance(response, dict):
         return None
 
@@ -283,14 +310,20 @@ def extract_intasend_invoice_id(response):
     )
 
     if invoice_id:
-        return invoice_id
+        return str(invoice_id)
 
-    invoice = response.get("invoice")
+    invoice = response.get(
+        "invoice"
+    )
 
     if isinstance(invoice, dict):
-        return invoice.get(
-            "invoice_id"
+        invoice_id = (
+            invoice.get("invoice_id")
+            or invoice.get("id")
         )
+
+        if invoice_id:
+            return str(invoice_id)
 
     return None
 
@@ -415,7 +448,6 @@ def process_completed_payment(
                 or payment_session["session_id"]
             )
 
-            # Prevent duplicate wallet credits.
             cur.execute(
                 """
                 SELECT id
@@ -448,9 +480,6 @@ def process_completed_payment(
                     "message": "Payment was already credited."
                 }
 
-            # ------------------------------------------------
-            # Add exactly KSh amount as SOMA Points.
-            # ------------------------------------------------
             cur.execute(
                 """
                 INSERT INTO wallet_transactions (
@@ -865,9 +894,6 @@ def save_student_performance():
     with database.get_connection() as conn:
         with conn.cursor() as cur:
 
-            # ------------------------------------------------
-            # TERM POINTS
-            # ------------------------------------------------
             for item in term_points:
 
                 if not isinstance(item, dict):
@@ -1011,9 +1037,6 @@ def save_student_performance():
 
                 terms_synced += 1
 
-            # ------------------------------------------------
-            # QUIZ RESULTS
-            # ------------------------------------------------
             for item in quiz_results:
 
                 if not isinstance(item, dict):
@@ -1100,8 +1123,6 @@ def save_student_performance():
                 ):
                     percentage = 0.0
 
-                # Prevent duplicate records when the same
-                # performance data is synced repeatedly.
                 cur.execute(
                     """
                     SELECT id
@@ -1572,9 +1593,6 @@ def create_intasend_payment_session():
             )
         }), 400
 
-    # Top-up is the primary current payment purpose.
-    # Legacy unlock/subscription purposes remain supported
-    # internally by coins.py for compatibility.
     if (
         purpose != "topup"
         and not is_valid_purpose(purpose)
@@ -1624,12 +1642,10 @@ def create_intasend_payment_session():
             )
         }), 404
 
-    # Public session identifier returned to frontend.
     session_id = secrets.token_urlsafe(
         24
     )
 
-    # Payment sessions expire after 30 minutes.
     expires_at = (
         datetime.utcnow()
         + timedelta(minutes=30)
@@ -1876,7 +1892,6 @@ def intasend_webhook():
             invoice_id=invoice_id,
         )
 
-        # Preserve existing purpose fulfilment support.
         try:
             coins_bp.fulfil_payment_purpose(
                 payment_session["id"]
