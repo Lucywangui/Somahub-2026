@@ -109,7 +109,7 @@ def get_db():
     connection that can be used directly with conn.execute().
     """
 
-    return database.get_db_connection()
+    return database.get_connection()
 
 
 def is_sandbox():
@@ -143,7 +143,7 @@ def calculate_wallet_balance(
             conn_or_code
         ).strip().upper()
 
-        with database.get_db_connection() as conn:
+        with database.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -351,7 +351,7 @@ def process_completed_payment(
     confirms the payment as COMPLETE.
     """
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
 
             cur.execute(
@@ -541,7 +541,7 @@ def sync_payment_from_intasend(
             }
 
         if state == "FAILED":
-            with database.get_db_connection() as conn:
+            with database.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
@@ -590,7 +590,7 @@ def get_student_by_code(
         soma_hub_code
     ).strip().upper()
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -695,7 +695,7 @@ def register_student():
             )
         }), 400
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
 
             cur.execute(
@@ -799,7 +799,7 @@ def student_performance():
                 )
             }), 400
 
-        with database.get_db_connection() as conn:
+        with database.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -889,7 +889,7 @@ def student_performance():
         + progress
     )
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -988,7 +988,7 @@ def admin_login():
             )
         }), 400
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1099,7 +1099,7 @@ def admin_student_lookup(
             "message": "Student not found."
         }), 404
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1130,7 +1130,7 @@ def admin_top_students():
             )
         }), 401
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1273,7 +1273,7 @@ def create_intasend_payment_session():
         24
     )
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1349,7 +1349,7 @@ def create_intasend_payment_session():
                 "an invoice ID."
             )
 
-        with database.get_db_connection() as conn:
+        with database.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -1386,7 +1386,7 @@ def create_intasend_payment_session():
             exc
         )
 
-        with database.get_db_connection() as conn:
+        with database.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -1459,7 +1459,7 @@ def intasend_webhook():
             "message": "Webhook received."
         })
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
 
             if invoice_id:
@@ -1520,7 +1520,7 @@ def intasend_webhook():
         })
 
     if state == "FAILED":
-        with database.get_db_connection() as conn:
+        with database.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -1561,7 +1561,7 @@ def intasend_webhook():
 def intasend_payment_status(
     session_id
 ):
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1606,7 +1606,7 @@ def intasend_payment_status(
                 utc_now() - created_at
                 > timedelta(minutes=30)
             ):
-                with database.get_db_connection() as conn:
+                with database.get_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
                             """
@@ -1636,8 +1636,6 @@ def intasend_payment_status(
             if state == "complete":
                 status = "completed"
 
-                # Fulfil subscription/material purpose
-                # after the wallet has been credited.
                 try:
                     coins_bp.fulfil_payment_purpose(
                         session_id
@@ -1666,7 +1664,7 @@ def intasend_payment_status(
         )
     )
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1766,7 +1764,7 @@ def dev_test_payment(
             )
         }), 403
 
-    with database.get_db_connection() as conn:
+    with database.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
