@@ -276,30 +276,11 @@ def get_intasend_service():
 
 def extract_intasend_invoice_id(response):
     """
-    Extract the IntaSend invoice identifier from the
-    different response structures returned by the SDK/API.
+    Extract an IntaSend invoice ID when one is supplied.
 
-    Supported examples:
-
-        {
-            "invoice_id": "ABC123"
-        }
-
-    or:
-
-        {
-            "invoice": {
-                "invoice_id": "ABC123"
-            }
-        }
-
-    or:
-
-        {
-            "invoice": {
-                "id": "ABC123"
-            }
-        }
+    IntaSend Checkout Link responses may primarily provide
+    a checkout URL, so invoice_id is optional at checkout
+    creation time.
     """
 
     if not isinstance(response, dict):
@@ -325,38 +306,125 @@ def extract_intasend_invoice_id(response):
         if invoice_id:
             return str(invoice_id)
 
+    data = response.get(
+        "data"
+    )
+
+    if isinstance(data, dict):
+        invoice_id = (
+            data.get("invoice_id")
+            or data.get("id")
+        )
+
+        if invoice_id:
+            return str(invoice_id)
+
+        nested_invoice = data.get(
+            "invoice"
+        )
+
+        if isinstance(nested_invoice, dict):
+            invoice_id = (
+                nested_invoice.get("invoice_id")
+                or nested_invoice.get("id")
+            )
+
+            if invoice_id:
+                return str(invoice_id)
+
     return None
 
 
 def extract_intasend_url(response):
+    """
+    Extract the checkout/payment URL returned by IntaSend.
+    """
+
     if not isinstance(response, dict):
         return None
 
-    return (
+    url = (
         response.get("url")
         or response.get("checkout_url")
         or response.get("payment_url")
     )
 
+    if url:
+        return str(url)
+
+    data = response.get(
+        "data"
+    )
+
+    if isinstance(data, dict):
+        url = (
+            data.get("url")
+            or data.get("checkout_url")
+            or data.get("payment_url")
+        )
+
+        if url:
+            return str(url)
+
+    return None
+
 
 def extract_intasend_api_ref(response):
+    """
+    Extract an IntaSend API reference when supplied.
+    """
+
     if not isinstance(response, dict):
         return None
 
-    return (
+    api_ref = (
         response.get("api_ref")
         or response.get("api_reference")
     )
+
+    if api_ref:
+        return str(api_ref)
+
+    data = response.get(
+        "data"
+    )
+
+    if isinstance(data, dict):
+        api_ref = (
+            data.get("api_ref")
+            or data.get("api_reference")
+        )
+
+        if api_ref:
+            return str(api_ref)
+
+    return None
 
 
 def extract_intasend_invoice(response):
     if not isinstance(response, dict):
         return {}
 
-    invoice = response.get("invoice")
+    invoice = response.get(
+        "invoice"
+    )
 
     if isinstance(invoice, dict):
         return invoice
+
+    data = response.get(
+        "data"
+    )
+
+    if isinstance(data, dict):
+        nested_invoice = data.get(
+            "invoice"
+        )
+
+        if isinstance(nested_invoice, dict):
+            return nested_invoice
+
+        return data
 
     return response
 
@@ -445,6 +513,7 @@ def process_completed_payment(
             reference = (
                 payment_session["checkout_request_id"]
                 or invoice_id
+                or payment_session["merchant_request_id"]
                 or payment_session["session_id"]
             )
 
@@ -539,6 +608,10 @@ def sync_payment_from_intasend(
 ):
     """
     Ask IntaSend for the latest payment status.
+
+    If the Checkout Link did not expose an invoice ID,
+    remain pending and allow the IntaSend webhook to
+    complete the payment.
     """
 
     invoice_id = (
@@ -549,9 +622,11 @@ def sync_payment_from_intasend(
 
     if not invoice_id:
         return {
-            "success": False,
-            "state": "FAILED",
-            "message": "Missing IntaSend invoice ID."
+            "success": True,
+            "state": "PENDING",
+            "message": (
+                "Waiting for IntaSend payment confirmation."
+            )
         }
 
     try:
@@ -1646,6 +1721,14 @@ def create_intasend_payment_session():
         24
     )
 
+    # Our own reference allows us to identify
+    # the payment session even when IntaSend's
+    # checkout response does not immediately
+    # expose an invoice ID.
+    api_ref = (
+        f"SOMA-{session_id}"
+    )
+
     expires_at = (
         datetime.utcnow()
         + timedelta(minutes=30)
@@ -1665,6 +1748,7 @@ def create_intasend_payment_session():
                     purpose,
                     phone_number,
                     status,
+                    merchant_request_id,
                     created_at,
                     expires_at
                 )
@@ -1676,6 +1760,7 @@ def create_intasend_payment_session():
                     %s,
                     %s,
                     'pending',
+                    %s,
                     CURRENT_TIMESTAMP,
                     %s
                 )
@@ -1688,6 +1773,7 @@ def create_intasend_payment_session():
                     amount,
                     purpose,
                     phone_number,
+                    api_ref,
                     expires_at,
                 ),
             )
@@ -1728,16 +1814,40 @@ def create_intasend_payment_session():
             )
         )
 
-        api_ref = (
+        response_api_ref = (
             extract_intasend_api_ref(
                 checkout_response
             )
         )
 
-        if not invoice_id:
+        final_api_ref = (
+            response_api_ref
+            or api_ref
+        )
+
+        # The checkout URL is the critical result
+        # needed to continue the IntaSend payment.
+        #
+        # Do NOT fail simply because invoice_id is absent.
+        if not checkout_url:
+            app.logger.error(
+                "IntaSend checkout response did not "
+                "contain a checkout URL. "
+                "response_type=%s response_keys=%s",
+                type(checkout_response).__name__,
+                (
+                    list(checkout_response.keys())
+                    if isinstance(
+                        checkout_response,
+                        dict
+                    )
+                    else []
+                ),
+            )
+
             raise RuntimeError(
                 "IntaSend did not return "
-                "an invoice ID."
+                "a checkout URL."
             )
 
         with database.get_connection() as conn:
@@ -1752,12 +1862,22 @@ def create_intasend_payment_session():
                     """,
                     (
                         invoice_id,
-                        api_ref,
+                        final_api_ref,
                         payment_db_id,
                     ),
                 )
 
                 conn.commit()
+
+        app.logger.info(
+            "IntaSend checkout created successfully. "
+            "session_id=%s invoice_id_present=%s "
+            "url_present=%s api_ref_present=%s",
+            session_id,
+            bool(invoice_id),
+            bool(checkout_url),
+            bool(final_api_ref),
+        )
 
         return jsonify({
             "success": True,
@@ -1840,8 +1960,9 @@ def intasend_webhook():
         )
     ).upper()
 
-    api_ref = payload.get(
-        "api_ref"
+    api_ref = (
+        payload.get("api_ref")
+        or payload.get("api_reference")
     )
 
     if not invoice_id and not api_ref:
@@ -1853,6 +1974,8 @@ def intasend_webhook():
     with database.get_connection() as conn:
         with conn.cursor() as cur:
 
+            payment_session = None
+
             if invoice_id:
                 cur.execute(
                     """
@@ -1863,7 +1986,10 @@ def intasend_webhook():
                     """,
                     (invoice_id,),
                 )
-            else:
+
+                payment_session = cur.fetchone()
+
+            if not payment_session and api_ref:
                 cur.execute(
                     """
                     SELECT *
@@ -1874,7 +2000,7 @@ def intasend_webhook():
                     (api_ref,),
                 )
 
-            payment_session = cur.fetchone()
+                payment_session = cur.fetchone()
 
     if not payment_session:
         return jsonify({
