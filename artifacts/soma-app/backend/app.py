@@ -7,16 +7,29 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.security import check_password_hash
 
-import database
-from coins import create_coins_blueprint, is_valid_purpose
-from intasend import APIService
-
 
 # ============================================================
 # ENVIRONMENT
 # ============================================================
 
-load_dotenv()
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+# Load .env BEFORE importing database.py because
+# database.py reads DATABASE_URL when it is imported.
+load_dotenv(
+    os.path.join(
+        BASE_DIR,
+        ".env"
+    ),
+    override=True,
+)
+
+import database
+from coins import create_coins_blueprint, is_valid_purpose
+from intasend import APIService
+
 
 INTASEND_PUBLISHABLE_KEY = os.getenv(
     "INTASEND_PUBLISHABLE_KEY",
@@ -93,6 +106,67 @@ def utc_now():
 def now_string():
     return datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def parse_database_datetime(value):
+    """
+    Convert PostgreSQL datetime values returned either as
+    datetime objects or strings into timezone-aware UTC
+    datetime objects.
+    """
+
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+
+        if not text:
+            return None
+
+        parsed = None
+
+        # Try common PostgreSQL timestamp formats.
+        formats = [
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+        ]
+
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(
+                    text,
+                    fmt
+                )
+                break
+            except ValueError:
+                continue
+
+        if parsed is None:
+            try:
+                parsed = datetime.fromisoformat(
+                    text.replace(
+                        "Z",
+                        "+00:00"
+                    )
+                )
+            except ValueError:
+                return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(
+            tzinfo=timezone.utc
+        )
+
+    return parsed.astimezone(
+        timezone.utc
     )
 
 
@@ -276,11 +350,11 @@ def get_intasend_service():
 
 def extract_intasend_invoice_id(response):
     """
-    Extract an IntaSend invoice ID when one is supplied.
+    Extract an IntaSend invoice ID.
 
-    IntaSend Checkout Link responses may primarily provide
-    a checkout URL, so invoice_id is optional at checkout
-    creation time.
+    Direct M-Pesa STK Push responses should provide
+    an invoice ID which is then used for payment
+    status verification.
     """
 
     if not isinstance(response, dict):
@@ -331,40 +405,6 @@ def extract_intasend_invoice_id(response):
 
             if invoice_id:
                 return str(invoice_id)
-
-    return None
-
-
-def extract_intasend_url(response):
-    """
-    Extract the checkout/payment URL returned by IntaSend.
-    """
-
-    if not isinstance(response, dict):
-        return None
-
-    url = (
-        response.get("url")
-        or response.get("checkout_url")
-        or response.get("payment_url")
-    )
-
-    if url:
-        return str(url)
-
-    data = response.get(
-        "data"
-    )
-
-    if isinstance(data, dict):
-        url = (
-            data.get("url")
-            or data.get("checkout_url")
-            or data.get("payment_url")
-        )
-
-        if url:
-            return str(url)
 
     return None
 
@@ -609,9 +649,9 @@ def sync_payment_from_intasend(
     """
     Ask IntaSend for the latest payment status.
 
-    If the Checkout Link did not expose an invoice ID,
-    remain pending and allow the IntaSend webhook to
-    complete the payment.
+    Direct STK Push stores the IntaSend invoice ID in
+    checkout_request_id for compatibility with the existing
+    payment-session schema.
     """
 
     invoice_id = (
@@ -1721,16 +1761,14 @@ def create_intasend_payment_session():
         24
     )
 
-    # Our own reference allows us to identify
-    # the payment session even when IntaSend's
-    # checkout response does not immediately
-    # expose an invoice ID.
+    # Our own reference identifies this payment
+    # session inside SOMA HUB.
     api_ref = (
         f"SOMA-{session_id}"
     )
 
     expires_at = (
-        datetime.utcnow()
+        utc_now()
         + timedelta(minutes=30)
     ).strftime(
         "%Y-%m-%d %H:%M:%S"
@@ -1787,36 +1825,33 @@ def create_intasend_payment_session():
     try:
         service = get_intasend_service()
 
-        checkout_response = (
-            service.collect.checkout(
+        # =====================================================
+        # DIRECT INTASEND M-PESA STK PUSH
+        #
+        # This does NOT create an IntaSend checkout page.
+        # It sends the M-Pesa payment prompt directly to
+        # the supplied phone number.
+        # =====================================================
+
+        stk_response = (
+            service.collect.mpesa_stk_push(
                 phone_number=phone_number,
-                email=None,
                 amount=amount,
+                narrative=f"SOMA HUB {purpose}",
                 currency="KES",
-                comment=(
-                    f"SOMA HUB {purpose}"
-                ),
-                redirect_url=(
-                    PAYMENT_REDIRECT_URL
-                ),
+                api_ref=api_ref,
             )
         )
 
         invoice_id = (
             extract_intasend_invoice_id(
-                checkout_response
-            )
-        )
-
-        checkout_url = (
-            extract_intasend_url(
-                checkout_response
+                stk_response
             )
         )
 
         response_api_ref = (
             extract_intasend_api_ref(
-                checkout_response
+                stk_response
             )
         )
 
@@ -1825,31 +1860,33 @@ def create_intasend_payment_session():
             or api_ref
         )
 
-        # The checkout URL is the critical result
-        # needed to continue the IntaSend payment.
-        #
-        # Do NOT fail simply because invoice_id is absent.
-        if not checkout_url:
+        # Direct STK Push must provide an invoice ID
+        # because it is required for later status checks.
+        if not invoice_id:
             app.logger.error(
-                "IntaSend checkout response did not "
-                "contain a checkout URL. "
-                "response_type=%s response_keys=%s",
-                type(checkout_response).__name__,
+                "IntaSend STK Push response did not "
+                "contain an invoice ID. "
+                "response_type=%s response_keys=%s "
+                "response=%s",
+                type(stk_response).__name__,
                 (
-                    list(checkout_response.keys())
+                    list(stk_response.keys())
                     if isinstance(
-                        checkout_response,
+                        stk_response,
                         dict
                     )
                     else []
                 ),
+                stk_response,
             )
 
             raise RuntimeError(
                 "IntaSend did not return "
-                "a checkout URL."
+                "a payment invoice ID."
             )
 
+        # Store IntaSend's invoice ID in the existing
+        # checkout_request_id column for compatibility.
         with database.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -1857,7 +1894,8 @@ def create_intasend_payment_session():
                     UPDATE payment_sessions
                     SET
                         checkout_request_id = %s,
-                        merchant_request_id = %s
+                        merchant_request_id = %s,
+                        status = 'pending'
                     WHERE id = %s
                     """,
                     (
@@ -1870,30 +1908,28 @@ def create_intasend_payment_session():
                 conn.commit()
 
         app.logger.info(
-            "IntaSend checkout created successfully. "
-            "session_id=%s invoice_id_present=%s "
-            "url_present=%s api_ref_present=%s",
+            "IntaSend M-Pesa STK Push created successfully. "
+            "session_id=%s invoice_id=%s api_ref=%s",
             session_id,
-            bool(invoice_id),
-            bool(checkout_url),
-            bool(final_api_ref),
+            invoice_id,
+            final_api_ref,
         )
 
         return jsonify({
             "success": True,
             "message": (
-                "IntaSend checkout created."
+                "M-Pesa payment prompt sent successfully."
             ),
             "session_id": session_id,
             "invoice_id": invoice_id,
-            "payment_url": checkout_url,
+            "payment_url": None,
             "amount": amount,
             "phone_number": phone_number,
         })
 
     except Exception as exc:
         app.logger.exception(
-            "Unable to create IntaSend checkout: %s",
+            "Unable to create IntaSend M-Pesa STK Push: %s",
             exc
         )
 
@@ -1914,7 +1950,7 @@ def create_intasend_payment_session():
             "success": False,
             "message": (
                 "Unable to create the "
-                "IntaSend payment session."
+                "IntaSend M-Pesa payment."
             ),
             "error": str(exc),
         }), 500
@@ -2106,20 +2142,21 @@ def intasend_payment_status(
 
     if status == "pending":
 
+        # =====================================================
+        # FIX:
+        # PostgreSQL may return created_at as a string.
+        # Convert it safely before checking tzinfo.
+        # =====================================================
+
         created_at = (
-            payment_session.get(
-                "created_at"
+            parse_database_datetime(
+                payment_session.get(
+                    "created_at"
+                )
             )
         )
 
         if created_at:
-
-            if created_at.tzinfo is None:
-                created_at = (
-                    created_at.replace(
-                        tzinfo=timezone.utc
-                    )
-                )
 
             if (
                 utc_now() - created_at

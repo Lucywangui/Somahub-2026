@@ -4,7 +4,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+def get_database_url():
+    return os.getenv("DATABASE_URL")
 
 
 class DatabaseConnection:
@@ -61,14 +62,16 @@ class DatabaseConnection:
 
 
 def get_connection():
-    if not DATABASE_URL:
+    database_url = get_database_url()
+
+    if not database_url:
         raise RuntimeError(
             "DATABASE_URL is not set. Add your Neon PostgreSQL connection string "
             "to the environment before starting the backend."
         )
 
     connection = psycopg2.connect(
-        DATABASE_URL,
+        database_url,
         cursor_factory=RealDictCursor
     )
 

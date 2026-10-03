@@ -38,7 +38,6 @@ type Step =
       name: "waiting";
       sessionId: string;
       amount: number;
-      paymentUrl?: string | null;
     }
   | { name: "failed"; message: string }
   | { name: "timeout" };
@@ -74,12 +73,14 @@ function savePhone(phone: string) {
 }
 
 /**
- * IntaSend payment flow:
- * payment details -> IntaSend checkout -> payment confirmation ->
+ * IntaSend direct M-Pesa STK Push flow:
+ * payment details -> STK Push -> payment confirmation ->
  * wallet update.
  *
- * The backend remains responsible for confirming the payment and
- * crediting the student's paid SOMA Points wallet.
+ * No IntaSend hosted checkout page is opened.
+ *
+ * The backend remains responsible for confirming the payment
+ * and crediting the student's paid SOMA Points wallet.
  */
 export function MpesaPayFlow({
   fixedAmount,
@@ -173,25 +174,18 @@ export function MpesaPayFlow({
 
       savePhone(phone.trim());
 
+      /*
+       * IntaSend has already sent the M-Pesa STK Push.
+       *
+       * Do NOT open result.paymentUrl.
+       * Direct STK Push does not require the student
+       * to visit an IntaSend checkout page.
+       */
       setStep({
         name: "waiting",
         sessionId: result.sessionId,
         amount: numericAmount,
-        paymentUrl: result.paymentUrl,
       });
-
-      /*
-       * If IntaSend returns a hosted checkout URL, open it in a
-       * new browser tab/window. The payment is still confirmed
-       * by the backend before the wallet is credited.
-       */
-      if (result.paymentUrl) {
-        window.open(
-          result.paymentUrl,
-          "_blank",
-          "noopener,noreferrer",
-        );
-      }
 
       void waitForPayment(
         result.sessionId,
@@ -335,7 +329,7 @@ export function MpesaPayFlow({
             style={{ background: "#25D366" }}
           >
             {isSubmitting
-              ? "Opening payment…"
+              ? "Sending STK Push…"
               : submitLabel ??
                 (fixedAmount
                   ? `Pay ${formatKsh(fixedAmount)}`
@@ -349,36 +343,32 @@ export function MpesaPayFlow({
   if (step.name === "waiting") {
     return (
       <div className="px-6 py-6 space-y-4 text-center">
-        <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-muted border-t-[#25D366]" />
+        <div className="text-4xl">📱</div>
 
         <div>
-          <p className="font-bold">
-            Complete your payment
+          <p className="font-bold text-lg">
+            Check your phone
           </p>
 
-          <p className="text-sm text-muted-foreground mt-1">
-            Complete the IntaSend payment for{" "}
-            {formatKsh(step.amount)}. We’ll update your
-            SOMA Points wallet as soon as the payment is
-            confirmed.
+          <p className="text-sm text-muted-foreground mt-2">
+            An M-Pesa payment prompt has been sent to
+            your phone for{" "}
+            <span className="font-semibold">
+              {formatKsh(step.amount)}
+            </span>
+            .
+          </p>
+
+          <p className="text-sm text-muted-foreground mt-2">
+            Enter your M-Pesa PIN on your phone to
+            complete the payment.
           </p>
         </div>
 
-        {step.paymentUrl && (
-          <Button
-            variant="outline"
-            className="w-full rounded-xl"
-            onClick={() =>
-              window.open(
-                step.paymentUrl!,
-                "_blank",
-                "noopener,noreferrer",
-              )
-            }
-          >
-            Open payment page
-          </Button>
-        )}
+        <div className="flex items-center justify-center gap-2 text-sm font-semibold">
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-muted border-t-[#25D366]" />
+          Waiting for payment confirmation…
+        </div>
 
         {import.meta.env.DEV && (
           <Button

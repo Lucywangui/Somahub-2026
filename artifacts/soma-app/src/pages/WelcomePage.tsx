@@ -120,15 +120,6 @@ export default function WelcomePage({
         </Button>
       </motion.div>
 
-      {/* Developer login */}
-      <button
-        type="button"
-        onClick={onDeveloperLogin}
-        className="mt-6 text-sm text-slate-300 hover:text-white underline underline-offset-4 transition-colors"
-      >
-        Developer Login
-      </button>
-
       {/* Floating stars */}
       {[...Array(6)].map((_, i) => (
         <motion.div
