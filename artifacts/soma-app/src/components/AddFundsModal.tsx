@@ -160,57 +160,6 @@ export function AddFundsModal({
                 </Button>
               </div>
 
-              <div className="rounded-xl border px-3 py-3 space-y-3">
-                <p className="font-bold text-sm text-foreground">
-                  How SOMA Points work
-                </p>
-
-                <div className="flex items-start gap-3">
-                  <span className="text-xl">💳</span>
-
-                  <div>
-                    <p className="text-sm font-semibold">
-                      Add real funds
-                    </p>
-
-                    <p className="text-xs text-muted-foreground">
-                      Pay through IntaSend to add funds
-                      to your SOMA HUB wallet.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-3">
-                  <span className="text-xl">🪙</span>
-
-                  <div>
-                    <p className="text-sm font-semibold">
-                      Receive the same amount in SOMA Points
-                    </p>
-
-                    <p className="text-xs text-muted-foreground">
-                      KSh 50 paid means 50 SOMA Points
-                      available for materials.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-3">
-                  <span className="text-xl">📚</span>
-
-                  <div>
-                    <p className="text-sm font-semibold">
-                      Use Points to unlock materials
-                    </p>
-
-                    <p className="text-xs text-muted-foreground">
-                      Materials deduct their exact SOMA
-                      Point price from your wallet.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
               <p className="text-xs text-muted-foreground text-center">
                 SOMA Points come from funds paid
                 into your wallet. Quizzes do not
