@@ -90,6 +90,26 @@ def create_coins_blueprint(
         ).fetchone()
 
     # ========================================================
+    # LOCK STUDENT
+    #
+    # This lock is used for wallet spending operations.
+    #
+    # It prevents two simultaneous purchases for the same
+    # student from both reading the same wallet balance.
+    # ========================================================
+
+    def lock_student(conn, student_id):
+        return conn.execute(
+            """
+            SELECT id, soma_hub_code, grade
+            FROM students
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (student_id,),
+        ).fetchone()
+
+    # ========================================================
     # LEGACY COIN BALANCE
     #
     # Kept only for backwards compatibility with old database
@@ -126,6 +146,9 @@ def create_coins_blueprint(
 
     # ========================================================
     # SUBSCRIPTIONS
+    #
+    # Legacy support only.
+    # New IntaSend payment sessions cannot create subscriptions.
     # ========================================================
 
     def active_subscriptions(conn, soma_hub_code):
@@ -250,11 +273,7 @@ def create_coins_blueprint(
         ).fetchone()
 
         return {
-            # Existing frontend field.
-            # It now represents paid wallet balance.
             "coins": wallet,
-
-            # Actual wallet balance.
             "ksh": wallet,
 
             "unlocked": [
@@ -262,22 +281,16 @@ def create_coins_blueprint(
                 for row in unlocked
             ],
 
-            # Free earning is disabled.
             "earned_today": 0,
 
             "imported": bool(imported),
 
             "prices": {
-                # Kept under the old field name so the current
-                # frontend does not break.
                 "material_coins": MATERIAL_PRICE_KSH,
-
-                # 1 KSh = 1 SOMA Point.
                 "ksh_per_coin": 1,
-
-                # No free reward earning.
                 "daily_cap": 0,
 
+                # Kept for frontend compatibility.
                 "subscription_ksh": (
                     SUBSCRIPTION_PRICE_KSH
                 ),
@@ -367,7 +380,7 @@ def create_coins_blueprint(
             (
                 student["id"],
                 student["soma_hub_code"],
-                amount,
+                -abs(int(amount)),
                 reference,
                 description,
                 now_string(),
@@ -505,11 +518,9 @@ def create_coins_blueprint(
     # ========================================================
     # IMPORT OLD LOCAL ACCOUNT DATA
     #
-    # IMPORTANT:
     # We DO NOT import old coins.
     #
-    # We only preserve previously unlocked materials so an
-    # existing student does not lose access.
+    # We only preserve previously unlocked materials.
     # ========================================================
 
     @bp.route(
@@ -587,16 +598,13 @@ def create_coins_blueprint(
     # ========================================================
     # MATERIAL UNLOCK
     #
-    # THIS IS THE MAIN ECONOMY CHANGE.
-    #
-    # Example:
+    # MAIN ECONOMY:
     #
     # Wallet = KSh 50
     # Material = KSh 5
     # After unlock = KSh 45
     #
-    # SOMA Points therefore also go:
-    #
+    # SOMA Points:
     # 50 -> 45
     # ========================================================
 
@@ -609,6 +617,28 @@ def create_coins_blueprint(
         code = student["soma_hub_code"]
 
         # ----------------------------------------------------
+        # IMPORTANT CONCURRENCY LOCK
+        #
+        # Lock the student's row before reading the wallet.
+        #
+        # This makes concurrent purchases for the same student
+        # execute one at a time.
+        # ----------------------------------------------------
+
+        locked_student = lock_student(
+            conn,
+            student["id"],
+        )
+
+        if not locked_student:
+            return 404, {
+                "message": "Student not found"
+            }
+
+        student = locked_student
+        code = student["soma_hub_code"]
+
+        # ----------------------------------------------------
         # Already unlocked?
         # ----------------------------------------------------
 
@@ -618,6 +648,7 @@ def create_coins_blueprint(
             FROM material_unlocks
             WHERE student_id = %s
               AND material_id = %s
+            FOR UPDATE
             """,
             (
                 student["id"],
@@ -634,7 +665,7 @@ def create_coins_blueprint(
             }
 
         # ----------------------------------------------------
-        # Active subscription?
+        # Active legacy subscription?
         # ----------------------------------------------------
 
         if subscription_covering(
@@ -688,16 +719,66 @@ def create_coins_blueprint(
 
         existing_payment = conn.execute(
             """
-            SELECT 1
+            SELECT id
             FROM wallet_transactions
             WHERE reference = %s
               AND transaction_type = 'DEBIT'
             LIMIT 1
+            FOR UPDATE
             """,
             (reference,),
         ).fetchone()
 
         if existing_payment:
+            existing_unlock = conn.execute(
+                """
+                SELECT 1
+                FROM material_unlocks
+                WHERE student_id = %s
+                  AND material_id = %s
+                LIMIT 1
+                """,
+                (
+                    student["id"],
+                    material_id,
+                ),
+            ).fetchone()
+
+            if not existing_unlock:
+                conn.execute(
+                    """
+                    INSERT INTO material_unlocks (
+                        student_id,
+                        soma_hub_code,
+                        material_id,
+                        coins_spent,
+                        ksh_spent,
+                        created_at
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    ON CONFLICT (
+                        student_id,
+                        material_id
+                    )
+                    DO NOTHING
+                    """,
+                    (
+                        student["id"],
+                        code,
+                        material_id,
+                        price,
+                        price,
+                        now_string(),
+                    ),
+                )
+
             return 200, {
                 "already_unlocked": True,
                 "via_subscription": False,
@@ -707,6 +788,10 @@ def create_coins_blueprint(
 
         # ----------------------------------------------------
         # Deduct REAL wallet balance.
+        #
+        # Student row is already locked above, so another
+        # concurrent purchase cannot pass the same balance
+        # check for this student.
         # ----------------------------------------------------
 
         debit_ksh(
@@ -719,14 +804,9 @@ def create_coins_blueprint(
 
         # ----------------------------------------------------
         # Record the unlock.
-        #
-        # coins_spent = price because SOMA Points mirror
-        # the wallet balance 1:1.
-        #
-        # ksh_spent = actual money deducted.
         # ----------------------------------------------------
 
-        conn.execute(
+        unlock_cursor = conn.execute(
             """
             INSERT INTO material_unlocks (
                 student_id,
@@ -749,6 +829,7 @@ def create_coins_blueprint(
                 material_id
             )
             DO NOTHING
+            RETURNING id
             """,
             (
                 student["id"],
@@ -760,6 +841,27 @@ def create_coins_blueprint(
             ),
         )
 
+        inserted_unlock = unlock_cursor.fetchone()
+
+        # This should normally always insert because the
+        # student's row is locked. Keep the safeguard anyway.
+        if not inserted_unlock:
+            conn.execute(
+                """
+                DELETE FROM wallet_transactions
+                WHERE reference = %s
+                  AND transaction_type = 'DEBIT'
+                """,
+                (reference,),
+            )
+
+            return 200, {
+                "already_unlocked": True,
+                "via_subscription": False,
+                "coins_spent": 0,
+                "ksh_spent": 0,
+            }
+
         return 200, {
             "already_unlocked": False,
             "via_subscription": False,
@@ -768,7 +870,11 @@ def create_coins_blueprint(
         }
 
     # ========================================================
-    # SUBSCRIPTION
+    # LEGACY SUBSCRIPTION
+    #
+    # Kept for compatibility with existing old data/routes.
+    # New IntaSend payment sessions are NOT allowed to create
+    # subscriptions.
     # ========================================================
 
     def perform_subscribe(
@@ -803,6 +909,19 @@ def create_coins_blueprint(
                 "duplicate": True,
                 "ksh_spent": 0,
             }
+
+        # Lock the student before checking and spending wallet.
+        locked_student = lock_student(
+            conn,
+            student["id"],
+        )
+
+        if not locked_student:
+            return 404, {
+                "message": "Student not found"
+            }
+
+        student = locked_student
 
         wallet = ksh_balance(
             conn,
@@ -982,7 +1101,10 @@ def create_coins_blueprint(
         )
 
     # ========================================================
-    # SUBSCRIBE
+    # LEGACY SUBSCRIBE ENDPOINT
+    #
+    # Existing frontend compatibility only.
+    # New IntaSend payment flow does not call this.
     # ========================================================
 
     @bp.route(
@@ -1054,9 +1176,6 @@ def create_coins_blueprint(
     # OLD QUIZ REWARD ENDPOINT
     #
     # No free points are awarded for quizzes anymore.
-    #
-    # Return success so the existing quiz flow does not
-    # break if it still calls this endpoint.
     # ========================================================
 
     @bp.route(
@@ -1114,17 +1233,19 @@ def create_coins_blueprint(
     #
     # Called after a successful payment.
     #
-    # For a material unlock:
+    # IMPORTANT:
+    # The payment session is locked before checking
+    # purpose_result.
     #
-    # payment -> wallet CREDIT
-    #          -> perform_unlock()
-    #          -> wallet DEBIT
+    # This prevents simultaneous webhook/status requests
+    # from fulfilling the same payment twice.
     #
-    # For subscription:
+    # Current supported real-money purpose:
     #
-    # payment -> wallet CREDIT
-    #          -> perform_subscribe()
-    #          -> wallet DEBIT
+    #     topup
+    #
+    # Material unlock purposes are retained for compatibility
+    # with any existing sessions.
     # ========================================================
 
     def fulfil_payment_purpose(
@@ -1133,70 +1254,121 @@ def create_coins_blueprint(
         conn = get_db()
 
         try:
+            # ------------------------------------------------
+            # LOCK PAYMENT SESSION
+            # ------------------------------------------------
+            #
+            # Webhook, payment-status and development payment
+            # calls can arrive at nearly the same time.
+            #
+            # FOR UPDATE ensures only one fulfilment transaction
+            # handles this session at a time.
+            # ------------------------------------------------
+
             session = conn.execute(
                 """
                 SELECT *
                 FROM payment_sessions
                 WHERE session_id = %s
+                FOR UPDATE
                 """,
                 (session_id,),
             ).fetchone()
 
-            if (
-                not session
-                or not session["purpose"]
-                or session["purpose_result"]
-            ):
-                return (
-                    session["purpose_result"]
-                    if session
-                    else None
-                )
-
-            student = find_student(
-                conn,
-                session["soma_hub_code"],
-            )
-
-            if not student:
+            if not session:
+                conn.rollback()
                 return None
+
+            # ------------------------------------------------
+            # Already fulfilled.
+            # ------------------------------------------------
+
+            if session["purpose_result"]:
+                result = session["purpose_result"]
+                conn.commit()
+                return result
 
             purpose = session["purpose"]
 
-            if purpose == "subscribe":
-                status, body = perform_subscribe(
-                    conn,
-                    student,
-                    f"SUB-{session_id}",
-                )
+            # ------------------------------------------------
+            # Normal wallet top-up.
+            #
+            # process_completed_payment() already credited the
+            # wallet. There is nothing else to debit/unlock.
+            # ------------------------------------------------
 
-            elif purpose.startswith(
-                "unlock:"
-            ):
-                status, body = perform_unlock(
-                    conn,
-                    student,
-                    purpose[
-                        len("unlock:"):
-                    ],
-                    allow_ksh=True,
-                )
-
-            else:
-                status, body = 400, {
-                    "message": "Unknown purpose"
-                }
-
-            if status == 200:
+            if not purpose or purpose == "topup":
                 result = "done"
 
             else:
-                conn.rollback()
-
-                result = (
-                    f"failed: "
-                    f"{body.get('message', 'unknown error')}"
+                student = find_student(
+                    conn,
+                    session["soma_hub_code"],
                 )
+
+                if not student:
+                    result = "failed: Student not found"
+
+                elif purpose.startswith(
+                    "unlock:"
+                ):
+                    material_id = purpose[
+                        len("unlock:"):
+                    ]
+
+                    if not ID_PATTERN.fullmatch(
+                        material_id
+                    ):
+                        result = (
+                            "failed: Invalid material ID"
+                        )
+
+                    else:
+                        status, body = perform_unlock(
+                            conn,
+                            student,
+                            material_id,
+                            allow_ksh=True,
+                        )
+
+                        if status == 200:
+                            result = "done"
+                        else:
+                            result = (
+                                f"failed: "
+                                f"{body.get('message', 'unknown error')}"
+                            )
+
+                elif purpose == "subscribe":
+                    # ------------------------------------------------
+                    # Subscription fulfilment is retained ONLY for
+                    # old already-created sessions.
+                    #
+                    # New payment sessions are prevented from using
+                    # this purpose by app.py.
+                    # ------------------------------------------------
+
+                    status, body = perform_subscribe(
+                        conn,
+                        student,
+                        f"SUB-{session_id}",
+                    )
+
+                    if status == 200:
+                        result = "done"
+                    else:
+                        result = (
+                            f"failed: "
+                            f"{body.get('message', 'unknown error')}"
+                        )
+
+                else:
+                    result = "failed: Unknown purpose"
+
+            # ------------------------------------------------
+            # Store the result while the payment session is
+            # still locked.
+            # ------------------------------------------------
 
             conn.execute(
                 """
@@ -1243,6 +1415,9 @@ def is_valid_purpose(purpose):
     if purpose is None:
         return True
 
+    # Subscription is retained only so older requests do not
+    # crash unexpectedly. New payment-session creation in
+    # app.py rejects it.
     if purpose == "subscribe":
         return True
 

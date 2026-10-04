@@ -72,7 +72,7 @@ def get_connection():
 
     connection = psycopg2.connect(
         database_url,
-        cursor_factory=RealDictCursor
+        cursor_factory=RealDictCursor,
     )
 
     return DatabaseConnection(connection)
@@ -82,9 +82,9 @@ def init_database():
     connection = get_connection()
 
     try:
-        # ---------------------------------------------------------
+        # =========================================================
         # STUDENTS
-        # ---------------------------------------------------------
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS students (
@@ -107,7 +107,6 @@ def init_database():
             """
         )
 
-        # Preserve existing school information from the old column.
         connection.execute(
             """
             UPDATE students
@@ -118,9 +117,9 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # ADMINS
-        # ---------------------------------------------------------
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS admins (
@@ -132,9 +131,9 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # TERM PERFORMANCE
-        # ---------------------------------------------------------
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS term_points (
@@ -155,9 +154,9 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # QUIZ RESULTS
-        # ---------------------------------------------------------
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS quiz_results (
@@ -179,9 +178,15 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # INTASEND PAYMENT SESSIONS
-        # ---------------------------------------------------------
+        #
+        # One payment session belongs to exactly one student.
+        #
+        # The application must NEVER trust a student code supplied
+        # later by the frontend to determine payment ownership.
+        # student_id is the authoritative owner.
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS payment_sessions (
@@ -206,8 +211,6 @@ def init_database():
             """
         )
 
-        # Existing databases may already have payment_sessions
-        # without phone_number.
         connection.execute(
             """
             ALTER TABLE payment_sessions
@@ -215,12 +218,12 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # LEGACY MPESA TRANSACTIONS
         #
-        # Kept only for database compatibility with existing data.
-        # SOMA HUB's current payment flow is IntaSend.
-        # ---------------------------------------------------------
+        # Retained for compatibility with existing data.
+        # Current payment flow is IntaSend.
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS mpesa_transactions (
@@ -248,12 +251,14 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # WALLET TRANSACTIONS
         #
-        # Positive amount  = money added to SOMA Points wallet.
-        # Negative amount  = money spent on a material.
-        # ---------------------------------------------------------
+        # Positive amount = wallet top-up.
+        # Negative amount = wallet spending.
+        #
+        # reference is used for idempotency.
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS wallet_transactions (
@@ -272,12 +277,9 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # LEGACY COIN TRANSACTIONS
-        #
-        # Kept for compatibility with older data/code.
-        # New SOMA HUB payments use wallet_transactions.
-        # ---------------------------------------------------------
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS coin_transactions (
@@ -296,9 +298,13 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # MATERIAL UNLOCKS
-        # ---------------------------------------------------------
+        #
+        # One student can unlock a material only once.
+        # This is a database-level protection in addition to the
+        # application-level locking in coins.py.
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS material_unlocks (
@@ -317,12 +323,12 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # SUBSCRIPTIONS
         #
-        # Kept in the database for compatibility with existing data.
-        # The user-facing Grade subscription will be removed separately.
-        # ---------------------------------------------------------
+        # Retained for old data/legacy routes.
+        # New IntaSend payment sessions should not create these.
+        # =========================================================
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -342,9 +348,10 @@ def init_database():
             """
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # INDEXES
-        # ---------------------------------------------------------
+        # =========================================================
+
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_subscriptions_soma_code
@@ -440,6 +447,74 @@ def init_database():
             """
             CREATE INDEX IF NOT EXISTS idx_wallet_transactions_reference
             ON wallet_transactions(reference)
+            """
+        )
+
+        # =========================================================
+        # SECURITY / IDEMPOTENCY INDEXES
+        # =========================================================
+
+        # A wallet reference represents one financial operation.
+        #
+        # The partial unique index allows multiple old rows with
+        # NULL references but guarantees that a real reference
+        # cannot be inserted twice.
+        #
+        # This protects against two concurrent webhook/status
+        # requests attempting to credit the same payment.
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            uq_wallet_transactions_reference_nonnull
+            ON wallet_transactions(reference)
+            WHERE reference IS NOT NULL
+            """
+        )
+
+        # A payment session must be quickly and safely located by
+        # its external/session identifier.
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            uq_payment_sessions_session_id
+            ON payment_sessions(session_id)
+            """
+        )
+
+        # Fast lookup for webhook/status ownership checks.
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_payment_sessions_owner
+            ON payment_sessions(session_id, student_id, soma_hub_code)
+            """
+        )
+
+        # Fast lookup when checking whether a particular student
+        # already owns a material.
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_material_unlocks_student_material
+            ON material_unlocks(student_id, material_id)
+            """
+        )
+
+        # Fast lookup for completed/processed wallet operations.
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_wallet_transactions_type_reference
+            ON wallet_transactions(transaction_type, reference)
+            """
+        )
+
+        # Fast lookup of completed payment sessions.
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_payment_sessions_status_completed
+            ON payment_sessions(status, completed_at)
             """
         )
 
