@@ -1917,15 +1917,32 @@ def create_payment_session():
         finally:
             conn.close()
 
+        # IMPORTANT:
+        # The frontend expects session_id.
+        # Keep the older camelCase fields too for compatibility.
+
         return jsonify({
             "success": True,
+
+            # Frontend payments.ts expects this:
+            "session_id": session_id,
+
+            # Existing compatibility fields:
             "sessionId": session_id,
+            "payment_session_id": payment_session_id,
             "paymentSessionId": payment_session_id,
+            "invoice_id": invoice_id,
             "invoiceId": invoice_id,
+
             "amount": float(amount),
             "phone": phone,
             "purpose": purpose,
-            "status": "PENDING",
+
+            # Frontend supports this field but does not require
+            # a redirect URL for the M-Pesa STK flow.
+            "payment_url": None,
+
+            "status": "pending",
         })
 
     except Exception as exc:
@@ -2265,7 +2282,9 @@ def intasend_webhook():
                 "already_processed",
                 False,
             ),
+            "payment_session_id": payment_session["id"],
             "paymentSessionId": payment_session["id"],
+            "wallet_balance": result.get("balance"),
             "balance": result.get("balance"),
             "fulfilment": fulfil_result,
             "state": "COMPLETE",
@@ -2403,10 +2422,23 @@ def payment_status(session_id):
             payment_session["soma_hub_code"]
         )
 
+        frontend_status = (
+            "failed"
+            if local_status == "FAILED"
+            else "expired"
+        )
+
         return jsonify({
             "success": True,
+
+            # Frontend-compatible:
+            "session_id": session_id,
+            "status": frontend_status,
+            "wallet_balance": balance,
+            "purpose_result": None,
+
+            # Existing compatibility:
             "sessionId": session_id,
-            "status": local_status,
             "balance": balance,
         })
 
@@ -2421,8 +2453,15 @@ def payment_status(session_id):
 
         return jsonify({
             "success": True,
+
+            # Frontend-compatible:
+            "session_id": session_id,
+            "status": "completed",
+            "wallet_balance": balance,
+            "purpose_result": None,
+
+            # Existing compatibility:
             "sessionId": session_id,
-            "status": "COMPLETED",
             "balance": balance,
         })
 
@@ -2505,14 +2544,48 @@ def payment_status(session_id):
 
         return jsonify({
             "success": True,
+
+            # Frontend-compatible:
+            "session_id": session_id,
+            "status": "completed",
+            "wallet_balance": balance,
+
+            # The existing fulfilment result remains available.
+            "purpose_result": None,
+
+            # Existing compatibility:
             "sessionId": session_id,
-            "status": "COMPLETED",
             "balance": balance,
             "fulfilment": fulfil_result,
         })
 
     # --------------------------------------------------------
-    # Still pending.
+    # Payment failed according to IntaSend.
+    # --------------------------------------------------------
+
+    if str(
+        result.get("state") or ""
+    ).upper() == "FAILED":
+        balance = calculate_wallet_balance(
+            payment_session["soma_hub_code"]
+        )
+
+        return jsonify({
+            "success": True,
+
+            # Frontend-compatible:
+            "session_id": session_id,
+            "status": "failed",
+            "wallet_balance": balance,
+            "purpose_result": None,
+
+            # Existing compatibility:
+            "sessionId": session_id,
+            "balance": balance,
+        })
+
+    # --------------------------------------------------------
+    # Still pending / processing.
     # --------------------------------------------------------
 
     balance = calculate_wallet_balance(
@@ -2521,11 +2594,15 @@ def payment_status(session_id):
 
     return jsonify({
         "success": True,
+
+        # Frontend-compatible:
+        "session_id": session_id,
+        "status": "pending",
+        "wallet_balance": balance,
+        "purpose_result": None,
+
+        # Existing compatibility:
         "sessionId": session_id,
-        "status": result.get(
-            "state",
-            "PENDING",
-        ),
         "balance": balance,
     })
 
