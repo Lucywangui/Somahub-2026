@@ -172,6 +172,11 @@ def calculate_wallet_balance(conn_or_code, code=None):
     and:
 
         calculate_wallet_balance(conn, "SH-XXXXXX")
+
+    CREDIT transactions increase the wallet.
+
+    DEBIT transactions are stored as positive amounts in
+    wallet_transactions, so they must be SUBTRACTED here.
     """
 
     if code is None:
@@ -195,7 +200,7 @@ def calculate_wallet_balance(conn_or_code, code=None):
                             WHEN transaction_type = 'CREDIT'
                                 THEN amount
                             WHEN transaction_type = 'DEBIT'
-                                THEN amount
+                                THEN -amount
                             ELSE 0
                         END
                     ),
@@ -293,11 +298,7 @@ def normalize_payment_purpose(value):
     """
     Normalizes wallet funding purposes.
 
-    The coins.py validation function intentionally does not
-    recognize "topup", so app.py handles the normal wallet
-    funding purpose here.
-
-    Missing purpose also means normal wallet top-up.
+    Missing purpose means normal wallet top-up.
     """
 
     if value is None:
@@ -343,8 +344,8 @@ def validate_payment_purpose(purpose):
     """
     Validate a normalized payment purpose.
 
-    "topup" is valid here because coins.py's validator is
-    intentionally limited to legacy purposes.
+    "topup" is handled here because coins.py's validator
+    intentionally supports the legacy purposes.
     """
 
     if purpose == "topup":
@@ -1697,13 +1698,6 @@ def create_payment_session():
         or ""
     ).strip()
 
-    # --------------------------------------------------------
-    # FIX:
-    # Normalize wallet funding purpose.
-    #
-    # Missing purpose now means "topup".
-    # --------------------------------------------------------
-
     raw_purpose = data.get("purpose")
 
     purpose = normalize_payment_purpose(
@@ -1725,10 +1719,6 @@ def create_payment_session():
             "field": "somaHubCode",
         }), 400
 
-    # --------------------------------------------------------
-    # Validate payment purpose.
-    # --------------------------------------------------------
-
     if not validate_payment_purpose(purpose):
         app.logger.warning(
             "Rejected payment session with invalid purpose: %s",
@@ -1740,10 +1730,6 @@ def create_payment_session():
             "error": "Invalid payment purpose.",
             "field": "purpose",
         }), 400
-
-    # --------------------------------------------------------
-    # New payment sessions cannot create subscriptions.
-    # --------------------------------------------------------
 
     if purpose == "subscribe":
         app.logger.warning(
@@ -2661,21 +2647,9 @@ coins_bp = create_coins_blueprint(
     is_sandbox,
 )
 
-# IMPORTANT:
-#
-# coins.py already defines its routes with /api/...
-#
-# Therefore DO NOT add url_prefix="/api" here.
-#
-# Old:
-# app.register_blueprint(coins_bp, url_prefix="/api")
-#
-# That produced:
-# /api/api/account/...
-#
-# Correct:
-# /api/account/...
-#
+# coins.py already defines routes with /api/...
+# Therefore there must NOT be another /api prefix here.
+
 app.register_blueprint(
     coins_bp
 )
