@@ -212,10 +212,22 @@ def calculate_wallet_balance(conn_or_code, code=None):
 
         calculate_wallet_balance(conn, "SH-XXXXXX")
 
-    CREDIT transactions increase the wallet.
+    Wallet ledger rules:
 
-    DEBIT transactions are stored as positive amounts in
-    wallet_transactions, so they must be SUBTRACTED here.
+    CREDIT:
+        Positive amount adds money to the wallet.
+
+    DEBIT:
+        Negative amount subtracts money from the wallet.
+
+    The current coins.py stores DEBIT amounts as negative
+    values. The calculation below also safely handles any
+    older DEBIT rows that may have been stored as positive
+    values by converting those positive DEBITs into negative
+    wallet effects.
+
+    This makes the wallet balance calculation permanently
+    consistent with the wallet transaction ledger.
     """
 
     if code is None:
@@ -238,8 +250,15 @@ def calculate_wallet_balance(conn_or_code, code=None):
                         CASE
                             WHEN transaction_type = 'CREDIT'
                                 THEN amount
+
                             WHEN transaction_type = 'DEBIT'
-                                THEN -amount
+                                THEN
+                                    CASE
+                                        WHEN amount < 0
+                                            THEN amount
+                                        ELSE -amount
+                                    END
+
                             ELSE 0
                         END
                     ),
