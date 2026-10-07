@@ -1917,10 +1917,6 @@ def create_payment_session():
         finally:
             conn.close()
 
-        # IMPORTANT:
-        # The frontend expects session_id.
-        # Keep the older camelCase fields too for compatibility.
-
         return jsonify({
             "success": True,
 
@@ -1938,8 +1934,6 @@ def create_payment_session():
             "phone": phone,
             "purpose": purpose,
 
-            # Frontend supports this field but does not require
-            # a redirect URL for the M-Pesa STK flow.
             "payment_url": None,
 
             "status": "pending",
@@ -2251,9 +2245,12 @@ def intasend_webhook():
             return jsonify(result), 500
 
         try:
+            # IMPORTANT:
+            # coins.py expects the TEXT session_id,
+            # not the numeric payment_sessions.id.
             fulfil_result = (
                 coins_bp.fulfil_payment_purpose(
-                    payment_session["id"]
+                    payment_session["session_id"]
                 )
             )
 
@@ -2262,7 +2259,7 @@ def intasend_webhook():
                 "Wallet credit succeeded but "
                 "payment purpose fulfilment failed "
                 "for session %s",
-                payment_session["id"],
+                payment_session["session_id"],
             )
 
             return jsonify({
@@ -2284,6 +2281,8 @@ def intasend_webhook():
             ),
             "payment_session_id": payment_session["id"],
             "paymentSessionId": payment_session["id"],
+            "session_id": payment_session["session_id"],
+            "sessionId": payment_session["session_id"],
             "wallet_balance": result.get("balance"),
             "balance": result.get("balance"),
             "fulfilment": fulfil_result,
@@ -2431,13 +2430,11 @@ def payment_status(session_id):
         return jsonify({
             "success": True,
 
-            # Frontend-compatible:
             "session_id": session_id,
             "status": frontend_status,
             "wallet_balance": balance,
             "purpose_result": None,
 
-            # Existing compatibility:
             "sessionId": session_id,
             "balance": balance,
         })
@@ -2454,13 +2451,11 @@ def payment_status(session_id):
         return jsonify({
             "success": True,
 
-            # Frontend-compatible:
             "session_id": session_id,
             "status": "completed",
             "wallet_balance": balance,
             "purpose_result": None,
 
-            # Existing compatibility:
             "sessionId": session_id,
             "balance": balance,
         })
@@ -2516,9 +2511,12 @@ def payment_status(session_id):
         )
 
         try:
+            # IMPORTANT:
+            # coins.py expects the TEXT session_id,
+            # not the numeric payment_sessions.id.
             fulfil_result = (
                 coins_bp.fulfil_payment_purpose(
-                    latest_session["id"]
+                    latest_session["session_id"]
                 )
             )
 
@@ -2526,7 +2524,7 @@ def payment_status(session_id):
             app.logger.exception(
                 "Payment completed but fulfilment "
                 "failed for session %s",
-                latest_session["id"],
+                latest_session["session_id"],
             )
 
             return jsonify({
@@ -2545,15 +2543,12 @@ def payment_status(session_id):
         return jsonify({
             "success": True,
 
-            # Frontend-compatible:
             "session_id": session_id,
             "status": "completed",
             "wallet_balance": balance,
 
-            # The existing fulfilment result remains available.
-            "purpose_result": None,
+            "purpose_result": fulfil_result,
 
-            # Existing compatibility:
             "sessionId": session_id,
             "balance": balance,
             "fulfilment": fulfil_result,
@@ -2573,13 +2568,11 @@ def payment_status(session_id):
         return jsonify({
             "success": True,
 
-            # Frontend-compatible:
             "session_id": session_id,
             "status": "failed",
             "wallet_balance": balance,
             "purpose_result": None,
 
-            # Existing compatibility:
             "sessionId": session_id,
             "balance": balance,
         })
@@ -2595,13 +2588,11 @@ def payment_status(session_id):
     return jsonify({
         "success": True,
 
-        # Frontend-compatible:
         "session_id": session_id,
         "status": "pending",
         "wallet_balance": balance,
         "purpose_result": None,
 
-        # Existing compatibility:
         "sessionId": session_id,
         "balance": balance,
     })
@@ -2674,6 +2665,8 @@ def dev_test_payment(session_id):
             "error": "Payment session not found.",
         }), 404
 
+    payment_session = dict(payment_session)
+
     result = process_completed_payment(
         payment_session["id"],
         invoice_id=payment_session.get(
@@ -2685,9 +2678,12 @@ def dev_test_payment(session_id):
         return jsonify(result), 500
 
     try:
+        # IMPORTANT:
+        # coins.py expects the TEXT session_id,
+        # not the numeric payment_sessions.id.
         fulfil_result = (
             coins_bp.fulfil_payment_purpose(
-                payment_session["id"]
+                payment_session["session_id"]
             )
         )
 
