@@ -1,6 +1,6 @@
-import hmac
 import os
 import secrets
+import hmac
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -11,34 +11,27 @@ from werkzeug.security import check_password_hash
 
 
 # ============================================================
-# LOAD ENVIRONMENT FIRST
+# ENVIRONMENT
 # ============================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
+# Load .env BEFORE importing database.py because
+# database.py reads DATABASE_URL when it is imported.
 load_dotenv(
-    os.path.join(BASE_DIR, ".env"),
+    os.path.join(
+        BASE_DIR,
+        ".env"
+    ),
     override=True,
 )
 
-
-# ============================================================
-# DATABASE / PAYMENT IMPORTS
-# ============================================================
-
 import database
-
-from coins import (
-    create_coins_blueprint,
-    is_valid_purpose,
-)
-
+from coins import create_coins_blueprint, is_valid_purpose
 from intasend import APIService
 
-
-# ============================================================
-# ENVIRONMENT
-# ============================================================
 
 INTASEND_PUBLISHABLE_KEY = os.getenv(
     "INTASEND_PUBLISHABLE_KEY",
@@ -53,9 +46,9 @@ INTASEND_SECRET_KEY = os.getenv(
 INTASEND_TEST_ENVIRONMENT = (
     os.getenv(
         "INTASEND_TEST_ENVIRONMENT",
-        "true",
+        "true"
     ).strip().lower()
-    in {"1", "true", "yes", "on"}
+    in ("1", "true", "yes", "on")
 )
 
 INTASEND_WEBHOOK_CHALLENGE = os.getenv(
@@ -65,37 +58,35 @@ INTASEND_WEBHOOK_CHALLENGE = os.getenv(
 
 PAYMENT_REDIRECT_URL = os.getenv(
     "PAYMENT_REDIRECT_URL",
-    "https://somaahub.co.ke",
+    "https://somaahub.co.ke"
 ).strip()
 
 SOMA_CORS_ORIGINS = os.getenv(
     "SOMA_CORS_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173",
-).strip()
+    "https://somaahub.co.ke,https://www.somaahub.co.ke,http://localhost:5173,http://127.0.0.1:5173"
+).replace("\n", "").strip()
 
 
 # ============================================================
-# FLASK APP
+# APP
 # ============================================================
 
 app = Flask(__name__)
 
 app.secret_key = os.getenv(
     "FLASK_SECRET_KEY",
-    secrets.token_hex(32),
+    secrets.token_hex(32)
 )
-
-allowed_origins = [
-    origin.strip()
-    for origin in SOMA_CORS_ORIGINS.split(",")
-    if origin.strip()
-]
 
 CORS(
     app,
     resources={
         r"/api/*": {
-            "origins": allowed_origins,
+            "origins": [
+                origin.strip()
+                for origin in SOMA_CORS_ORIGINS.split(",")
+                if origin.strip()
+            ]
         }
     },
     supports_credentials=True,
@@ -107,7 +98,7 @@ app.config["SESSION_COOKIE_SAMESITE"] = "None"
 
 
 # ============================================================
-# TIME HELPERS
+# TIME / DATABASE HELPERS
 # ============================================================
 
 def utc_now():
@@ -115,41 +106,70 @@ def utc_now():
 
 
 def now_string():
-    return utc_now().isoformat()
+    return datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
 
 def parse_database_datetime(value):
     """
-    Convert PostgreSQL datetime/string values into
-    timezone-aware UTC.
+    Convert PostgreSQL datetime values returned either as
+    datetime objects or strings into timezone-aware UTC
+    datetime objects.
     """
+
     if value is None:
         return None
 
     if isinstance(value, datetime):
-        result = value
+        parsed = value
     else:
-        value = str(value).strip()
+        text = str(value).strip()
 
-        if not value:
+        if not text:
             return None
 
-        try:
-            result = datetime.fromisoformat(
-                value.replace("Z", "+00:00")
-            )
-        except ValueError:
-            return None
+        parsed = None
 
-    if result.tzinfo is None:
-        result = result.replace(tzinfo=timezone.utc)
+        formats = [
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+        ]
 
-    return result.astimezone(timezone.utc)
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(
+                    text,
+                    fmt
+                )
+                break
+            except ValueError:
+                continue
 
+        if parsed is None:
+            try:
+                parsed = datetime.fromisoformat(
+                    text.replace(
+                        "Z",
+                        "+00:00"
+                    )
+                )
+            except ValueError:
+                return None
 
-# ============================================================
-# DATABASE HELPERS
-# ============================================================
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(
+            tzinfo=timezone.utc
+        )
+
+    return parsed.astimezone(
+        timezone.utc
+    )
+
 
 def get_db():
     return database.get_connection()
@@ -160,38 +180,73 @@ def is_sandbox():
 
 
 # ============================================================
-# WALLET
+# WALLET BALANCE
 # ============================================================
 
-def calculate_wallet_balance(conn_or_code, code=None):
+def calculate_wallet_balance(
+    conn_or_code,
+    soma_hub_code=None,
+):
     """
-    Supports both:
+    Calculate the student's paid SOMA Points balance.
 
-        calculate_wallet_balance("SH-XXXXXX")
+    Supports:
+
+        calculate_wallet_balance(code)
 
     and:
 
-        calculate_wallet_balance(conn, "SH-XXXXXX")
-
-    CREDIT transactions increase the wallet.
-
-    DEBIT transactions are stored as positive amounts in
-    wallet_transactions, so they must be SUBTRACTED here.
+        calculate_wallet_balance(conn, code)
     """
 
-    if code is None:
-        code = conn_or_code
-        connection = None
-        should_close = True
-    else:
-        connection = conn_or_code
-        should_close = False
+    if soma_hub_code is None:
+        code = str(
+            conn_or_code
+        ).strip().upper()
+
+        with database.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN transaction_type = 'CREDIT'
+                                        THEN amount
+                                    WHEN transaction_type = 'DEBIT'
+                                        THEN -amount
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS balance
+                    FROM wallet_transactions
+                    WHERE soma_hub_code = %s
+                    """,
+                    (code,),
+                )
+
+                row = cur.fetchone()
+
+        if not row:
+            return 0
+
+        return max(
+            0,
+            int(row["balance"] or 0)
+        )
+
+    conn = conn_or_code
+
+    code = str(
+        soma_hub_code
+    ).strip().upper()
+
+    cursor = conn.cursor()
 
     try:
-        if connection is None:
-            connection = get_db()
-
-        row = connection.execute(
+        cursor.execute(
             """
             SELECT
                 COALESCE(
@@ -210,58 +265,194 @@ def calculate_wallet_balance(conn_or_code, code=None):
             WHERE soma_hub_code = %s
             """,
             (code,),
-        ).fetchone()
+        )
 
-        if not row:
-            return 0.0
-
-        balance = row.get("balance", 0)
-
-        if balance is None:
-            return 0.0
-
-        return float(balance)
+        row = cursor.fetchone()
 
     finally:
-        if should_close and connection is not None:
-            connection.close()
+        cursor.close()
+
+    if not row:
+        return 0
+
+    return max(
+        0,
+        int(row["balance"] or 0)
+    )
 
 
 # ============================================================
-# PHONE NUMBER
+# PHONE / INTASEND HELPERS
 # ============================================================
 
-def normalize_kenyan_phone(phone):
+def normalize_phone(phone):
+    """
+    Normalize common Kenyan phone formats.
+
+    0712345678 -> 254712345678
+    712345678  -> 254712345678
+    +254712345678 -> 254712345678
+    """
+
     if phone is None:
         return None
 
-    value = str(phone).strip()
+    phone = (
+        str(phone)
+        .strip()
+        .replace(" ", "")
+        .replace("-", "")
+    )
 
-    if value.startswith("+254"):
-        value = "254" + value[4:]
+    if phone.startswith("+"):
+        phone = phone[1:]
 
-    elif value.startswith("254"):
-        pass
+    if phone.startswith("0") and len(phone) == 10:
+        phone = "254" + phone[1:]
 
-    elif value.startswith("07"):
-        value = "254" + value[1:]
+    elif phone.startswith("7") and len(phone) == 9:
+        phone = "254" + phone
 
-    elif value.startswith("01"):
-        value = "254" + value[1:]
+    elif phone.startswith("1") and len(phone) == 9:
+        phone = "254" + phone
 
-    else:
+    if not phone.isdigit():
         return None
 
-    if len(value) != 12:
+    if not phone.startswith("254"):
         return None
 
-    if not value.startswith("254"):
+    if len(phone) != 12:
         return None
 
-    if not value[3:].isdigit():
+    return phone
+
+
+def get_intasend_service():
+    if (
+        not INTASEND_SECRET_KEY
+        and not INTASEND_PUBLISHABLE_KEY
+    ):
+        raise RuntimeError(
+            "IntaSend credentials are not configured."
+        )
+
+    return APIService(
+        token=INTASEND_SECRET_KEY or None,
+        publishable_key=(
+            INTASEND_PUBLISHABLE_KEY or None
+        ),
+        test=INTASEND_TEST_ENVIRONMENT,
+    )
+
+
+def extract_intasend_invoice_id(response):
+    if not isinstance(response, dict):
         return None
 
-    return value
+    invoice_id = response.get(
+        "invoice_id"
+    )
+
+    if invoice_id:
+        return str(invoice_id)
+
+    invoice = response.get(
+        "invoice"
+    )
+
+    if isinstance(invoice, dict):
+        invoice_id = (
+            invoice.get("invoice_id")
+            or invoice.get("id")
+        )
+
+        if invoice_id:
+            return str(invoice_id)
+
+    data = response.get(
+        "data"
+    )
+
+    if isinstance(data, dict):
+        invoice_id = (
+            data.get("invoice_id")
+            or data.get("id")
+        )
+
+        if invoice_id:
+            return str(invoice_id)
+
+        nested_invoice = data.get(
+            "invoice"
+        )
+
+        if isinstance(nested_invoice, dict):
+            invoice_id = (
+                nested_invoice.get("invoice_id")
+                or nested_invoice.get("id")
+            )
+
+            if invoice_id:
+                return str(invoice_id)
+
+    return None
+
+
+def extract_intasend_api_ref(response):
+    if not isinstance(response, dict):
+        return None
+
+    api_ref = (
+        response.get("api_ref")
+        or response.get("api_reference")
+    )
+
+    if api_ref:
+        return str(api_ref)
+
+    data = response.get(
+        "data"
+    )
+
+    if isinstance(data, dict):
+        api_ref = (
+            data.get("api_ref")
+            or data.get("api_reference")
+        )
+
+        if api_ref:
+            return str(api_ref)
+
+    return None
+
+
+def extract_intasend_invoice(response):
+    if not isinstance(response, dict):
+        return {}
+
+    invoice = response.get(
+        "invoice"
+    )
+
+    if isinstance(invoice, dict):
+        return invoice
+
+    data = response.get(
+        "data"
+    )
+
+    if isinstance(data, dict):
+        nested_invoice = data.get(
+            "invoice"
+        )
+
+        if isinstance(nested_invoice, dict):
+            return nested_invoice
+
+        return data
+
+    return response
 
 
 # ============================================================
@@ -270,255 +461,236 @@ def normalize_kenyan_phone(phone):
 
 def normalize_amount(value):
     try:
-        amount = Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError):
+        amount = Decimal(
+            str(value)
+        )
+    except (
+        InvalidOperation,
+        TypeError,
+        ValueError,
+    ):
         return None
 
     if amount <= 0:
         return None
 
-    return amount.quantize(Decimal("0.01"))
+    return amount.quantize(
+        Decimal("0.01")
+    )
 
 
-def amounts_match(first, second):
-    first_amount = normalize_amount(first)
-    second_amount = normalize_amount(second)
+def amounts_match(
+    first,
+    second,
+):
+    first_amount = normalize_amount(
+        first
+    )
 
-    if first_amount is None or second_amount is None:
+    second_amount = normalize_amount(
+        second
+    )
+
+    if (
+        first_amount is None
+        or second_amount is None
+    ):
         return False
 
     return first_amount == second_amount
 
 
+def is_whole_shilling(
+    amount
+):
+    if amount is None:
+        return False
+
+    return amount == amount.to_integral_value()
+
+
 # ============================================================
-# PAYMENT PURPOSE NORMALIZATION
+# PAYMENT PURPOSE
 # ============================================================
 
-def normalize_payment_purpose(value):
-    """
-    Normalizes wallet funding purposes.
-
-    Missing purpose means normal wallet top-up.
-    """
-
-    if value is None:
+def normalize_payment_purpose(
+    purpose
+):
+    if purpose is None:
         return "topup"
 
-    purpose = str(value).strip()
+    purpose = str(
+        purpose
+    ).strip()
 
     if not purpose:
         return "topup"
 
-    normalized = purpose.lower()
-
-    wallet_aliases = {
-        "topup": "topup",
-        "wallet_topup": "topup",
-        "wallet-topup": "topup",
-        "wallet topup": "topup",
-        "wallet_top_up": "topup",
-        "wallet-top-up": "topup",
-        "wallet top up": "topup",
-        "add_funds": "topup",
-        "add-funds": "topup",
-        "add funds": "topup",
-        "addfunds": "topup",
-        "fund_wallet": "topup",
-        "fund-wallet": "topup",
-        "fund wallet": "topup",
+    aliases = {
+        "top_up": "topup",
+        "top-up": "topup",
+        "wallet": "topup",
+        "deposit": "topup",
     }
 
-    if normalized in wallet_aliases:
+    normalized = aliases.get(
+        purpose.lower(),
+        purpose,
+    )
+
+    if normalized.lower() == "topup":
         return "topup"
 
-    if normalized == "subscribe":
+    if normalized.lower() == "subscribe":
         return "subscribe"
 
-    if normalized.startswith("unlock:"):
-        return "unlock:" + purpose[len("unlock:"):].strip()
+    if normalized.lower().startswith(
+        "unlock:"
+    ):
+        material_id = normalized[
+            len("unlock:"):
+        ].strip()
 
-    return purpose
+        if material_id:
+            return (
+                "unlock:"
+                + material_id
+            )
+
+    return normalized
 
 
-def validate_payment_purpose(purpose):
-    """
-    Validate a normalized payment purpose.
+def validate_payment_purpose(
+    purpose
+):
+    normalized = normalize_payment_purpose(
+        purpose
+    )
 
-    "topup" is handled here because coins.py's validator
-    intentionally supports the legacy purposes.
-    """
-
-    if purpose == "topup":
+    if normalized == "topup":
         return True
 
-    return is_valid_purpose(purpose)
-
-
-# ============================================================
-# INTASEND SERVICE
-# ============================================================
-
-def get_intasend_service():
-    return APIService(
-        token=INTASEND_SECRET_KEY or None,
-        publishable_key=INTASEND_PUBLISHABLE_KEY or None,
-        test=INTASEND_TEST_ENVIRONMENT,
+    return is_valid_purpose(
+        normalized
     )
 
 
 # ============================================================
-# INTASEND RESPONSE HELPERS
+# STUDENT LOOKUP
 # ============================================================
 
-def extract_intasend_invoice_id(response):
-    if not response:
-        return None
+def get_student_by_code(
+    soma_hub_code
+):
+    code = str(
+        soma_hub_code
+    ).strip().upper()
 
-    if isinstance(response, dict):
-        invoice = response.get("invoice")
+    with database.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM students
+                WHERE soma_hub_code = %s
+                LIMIT 1
+                """,
+                (code,),
+            )
 
-        if isinstance(invoice, dict):
-            value = invoice.get("invoice_id")
-
-            if value:
-                return str(value).strip()
-
-        for key in (
-            "invoice_id",
-            "invoiceId",
-            "invoice",
-        ):
-            value = response.get(key)
-
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-
-    return None
-
-
-def extract_intasend_api_ref(response):
-    if not response:
-        return None
-
-    if isinstance(response, dict):
-        invoice = response.get("invoice")
-
-        if isinstance(invoice, dict):
-            value = invoice.get("api_ref")
-
-            if value:
-                return str(value).strip()
-
-        for key in (
-            "api_ref",
-            "api_reference",
-            "apiRef",
-        ):
-            value = response.get(key)
-
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-
-    return None
-
-
-def extract_intasend_invoice(response):
-    if not response:
-        return {}
-
-    if isinstance(response, dict):
-        invoice = response.get("invoice")
-
-        if isinstance(invoice, dict):
-            return invoice
-
-        return response
-
-    return {}
+            return cur.fetchone()
 
 
 # ============================================================
-# STUDENT HELPERS
+# PAYMENT SESSION HELPERS
 # ============================================================
 
-def get_student_by_code(conn, soma_hub_code):
-    return conn.execute(
-        """
-        SELECT *
-        FROM students
-        WHERE soma_hub_code = %s
-        LIMIT 1
-        """,
-        (soma_hub_code,),
-    ).fetchone()
+def payment_session_reference(
+    payment_session
+):
+    return (
+        payment_session.get(
+            "checkout_request_id"
+        )
+        or payment_session.get(
+            "invoice_id"
+        )
+        or payment_session.get(
+            "merchant_request_id"
+        )
+        or payment_session.get(
+            "session_id"
+        )
+    )
 
-
-# ============================================================
-# PAYMENT PROCESSING
-# ============================================================
 
 def process_completed_payment(
     payment_session_id,
     invoice_id=None,
 ):
     """
-    Atomically credits a completed payment.
+    Credit the wallet exactly once.
 
-    Important:
-    - Locks the payment session.
-    - Uses a PostgreSQL advisory transaction lock.
-    - Checks for an existing wallet credit.
-    - Never credits the same payment twice.
+    The payment_sessions row is locked first.
+    A PostgreSQL advisory lock based on the transaction
+    reference provides another layer of duplicate protection.
     """
 
-    conn = get_db()
+    conn = database.get_connection()
 
     try:
-        payment_session = conn.execute(
+        cur = conn.cursor()
+
+        cur.execute(
             """
             SELECT *
             FROM payment_sessions
             WHERE id = %s
             FOR UPDATE
             """,
-            (payment_session_id,),
-        ).fetchone()
+            (
+                payment_session_id,
+            ),
+        )
+
+        payment_session = cur.fetchone()
 
         if not payment_session:
             conn.rollback()
-
             return {
                 "success": False,
-                "error": "Payment session not found.",
+                "message": (
+                    "Payment session not found."
+                ),
             }
 
-        payment_session = dict(payment_session)
-
-        existing_status = (
-            str(
-                payment_session.get("status") or ""
+        current_status = str(
+            payment_session.get(
+                "status",
+                ""
             )
-            .strip()
-            .upper()
-        )
+        ).upper()
 
-        if existing_status == "COMPLETED":
+        if current_status == "COMPLETED":
             balance = calculate_wallet_balance(
                 conn,
-                payment_session["soma_hub_code"],
+                payment_session[
+                    "soma_hub_code"
+                ],
             )
 
-            conn.commit()
+            conn.rollback()
 
             return {
                 "success": True,
                 "already_processed": True,
-                "payment_session_id": payment_session_id,
                 "balance": balance,
             }
 
         amount = normalize_amount(
-            payment_session.get("amount")
+            payment_session.get(
+                "amount"
+            )
         )
 
         if amount is None:
@@ -526,28 +698,79 @@ def process_completed_payment(
 
             return {
                 "success": False,
-                "error": "Invalid payment amount.",
+                "message": (
+                    "Invalid payment session amount."
+                ),
             }
 
         soma_hub_code = str(
-            payment_session.get("soma_hub_code") or ""
-        ).strip()
+            payment_session.get(
+                "soma_hub_code"
+            )
+        ).strip().upper()
 
-        student_id = payment_session.get("student_id")
-
-        if not soma_hub_code or not student_id:
+        if not soma_hub_code:
             conn.rollback()
 
             return {
                 "success": False,
-                "error": "Payment session has no valid student.",
+                "message": (
+                    "Payment session has no student code."
+                ),
+            }
+
+        student_id = payment_session.get(
+            "student_id"
+        )
+
+        cur.execute(
+            """
+            SELECT *
+            FROM students
+            WHERE soma_hub_code = %s
+            LIMIT 1
+            """,
+            (
+                soma_hub_code,
+            ),
+        )
+
+        student = cur.fetchone()
+
+        if not student:
+            conn.rollback()
+
+            return {
+                "success": False,
+                "message": (
+                    "Student for payment was not found."
+                ),
+            }
+
+        if (
+            student_id is not None
+            and student.get("id") != student_id
+        ):
+            conn.rollback()
+
+            return {
+                "success": False,
+                "message": (
+                    "Payment student verification failed."
+                ),
             }
 
         reference = (
-            payment_session.get("checkout_request_id")
+            payment_session.get(
+                "checkout_request_id"
+            )
             or invoice_id
-            or payment_session.get("merchant_request_id")
-            or payment_session.get("session_id")
+            or payment_session.get(
+                "merchant_request_id"
+            )
+            or payment_session.get(
+                "session_id"
+            )
         )
 
         if not reference:
@@ -555,54 +778,52 @@ def process_completed_payment(
 
             return {
                 "success": False,
-                "error": "Payment has no valid reference.",
+                "message": (
+                    "Payment has no transaction reference."
+                ),
             }
 
-        reference = str(reference).strip()
-
-        # ----------------------------------------------------
-        # PAYMENT REFERENCE LOCK
-        # ----------------------------------------------------
-
-        conn.execute(
-            """
-            SELECT pg_advisory_xact_lock(hashtext(%s))
-            """,
-            (reference,),
+        reference = str(
+            reference
         )
 
-        # ----------------------------------------------------
-        # DUPLICATE PAYMENT CHECK
-        # ----------------------------------------------------
-
-        existing_transaction = conn.execute(
+        # Serialize all processing attempts for this
+        # exact payment reference.
+        cur.execute(
             """
-            SELECT
-                id,
-                amount,
-                transaction_type,
-                reference
+            SELECT pg_advisory_xact_lock(
+                hashtext(%s)
+            )
+            """,
+            (
+                reference,
+            ),
+        )
+
+        cur.execute(
+            """
+            SELECT id
             FROM wallet_transactions
             WHERE reference = %s
             LIMIT 1
             """,
-            (reference,),
-        ).fetchone()
+            (
+                reference,
+            ),
+        )
+
+        existing_transaction = (
+            cur.fetchone()
+        )
 
         if existing_transaction:
-            conn.execute(
+            cur.execute(
                 """
                 UPDATE payment_sessions
-                SET
-                    status = 'COMPLETED',
-                    completed_at = COALESCE(
-                        completed_at,
-                        %s
-                    )
+                SET status = 'COMPLETED'
                 WHERE id = %s
                 """,
                 (
-                    now_string(),
                     payment_session_id,
                 ),
             )
@@ -617,98 +838,62 @@ def process_completed_payment(
             return {
                 "success": True,
                 "already_processed": True,
-                "payment_session_id": payment_session_id,
-                "transaction_id": existing_transaction["id"],
                 "balance": balance,
             }
 
-        # ----------------------------------------------------
-        # VERIFY STUDENT
-        # ----------------------------------------------------
+        stored_invoice_id = (
+            payment_session.get(
+                "checkout_request_id"
+            )
+        )
 
-        student = conn.execute(
-            """
-            SELECT
-                id,
-                soma_hub_code
-            FROM students
-            WHERE id = %s
-              AND soma_hub_code = %s
-            LIMIT 1
-            """,
-            (
-                student_id,
-                soma_hub_code,
-            ),
-        ).fetchone()
-
-        if not student:
+        if (
+            invoice_id
+            and stored_invoice_id
+            and str(invoice_id)
+            != str(stored_invoice_id)
+        ):
             conn.rollback()
 
             return {
                 "success": False,
-                "error": (
-                    "Student associated with payment "
-                    "was not found."
+                "message": (
+                    "Payment invoice verification failed."
                 ),
             }
 
-        # ----------------------------------------------------
-        # CREDIT WALLET
-        # ----------------------------------------------------
-
-        transaction = conn.execute(
+        cur.execute(
             """
             INSERT INTO wallet_transactions (
-                student_id,
                 soma_hub_code,
-                amount,
                 transaction_type,
+                amount,
                 reference,
-                description,
                 created_at
             )
             VALUES (
-                %s,
-                %s,
                 %s,
                 'CREDIT',
                 %s,
                 %s,
                 %s
             )
-            RETURNING id
             """,
             (
-                student_id,
                 soma_hub_code,
                 amount,
                 reference,
-                "SOMA HUB wallet top-up",
                 now_string(),
             ),
-        ).fetchone()
-
-        transaction_id = (
-            transaction["id"]
-            if transaction
-            else None
         )
 
-        # ----------------------------------------------------
-        # MARK PAYMENT COMPLETE
-        # ----------------------------------------------------
-
-        conn.execute(
+        cur.execute(
             """
             UPDATE payment_sessions
-            SET
-                status = 'COMPLETED',
-                completed_at = %s
+            SET status = 'COMPLETED'
             WHERE id = %s
             """,
             (
-                now_string(),
                 payment_session_id,
             ),
         )
@@ -723,9 +908,8 @@ def process_completed_payment(
         return {
             "success": True,
             "already_processed": False,
-            "payment_session_id": payment_session_id,
-            "transaction_id": transaction_id,
             "balance": balance,
+            "amount": float(amount),
         }
 
     except Exception:
@@ -735,134 +919,490 @@ def process_completed_payment(
     finally:
         conn.close()
 
-
 # ============================================================
-# SYNC PAYMENT STATUS FROM INTASEND
+# INTASEND PAYMENT STATUS VERIFICATION
 # ============================================================
 
-def sync_payment_from_intasend(payment_session):
-    if not payment_session:
-        return {
-            "success": False,
-            "error": "Payment session not found.",
-        }
+def verify_intasend_completed_payment(
+    payment_session,
+    invoice_id=None,
+):
+    """
+    Independently verify a COMPLETE payment with IntaSend
+    before any wallet credit is released.
 
-    invoice_id = payment_session.get(
-        "checkout_request_id"
+    The webhook itself is NOT trusted as the final source
+    of payment truth.
+    """
+
+    stored_invoice_id = (
+        payment_session.get(
+            "checkout_request_id"
+        )
+    )
+
+    invoice_id = (
+        invoice_id
+        or stored_invoice_id
     )
 
     if not invoice_id:
         return {
             "success": False,
-            "error": "Payment has no IntaSend invoice ID.",
+            "message": (
+                "No IntaSend invoice ID is available."
+            ),
         }
 
-    service = get_intasend_service()
+    if (
+        stored_invoice_id
+        and str(invoice_id)
+        != str(stored_invoice_id)
+    ):
+        return {
+            "success": False,
+            "message": (
+                "IntaSend invoice ID does not "
+                "match the payment session."
+            ),
+        }
 
-    response = service.collect.status(
-        invoice_id=invoice_id
+    try:
+        service = get_intasend_service()
+
+        response = service.collect.status(
+            invoice_id=str(invoice_id)
+        )
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": (
+                "Unable to verify payment status "
+                "with IntaSend."
+            ),
+            "error": str(exc),
+        }
+
+    invoice = extract_intasend_invoice(
+        response
     )
-
-    invoice = extract_intasend_invoice(response)
-
-    state = str(
-        invoice.get("state")
-        or response.get("state", "")
-        or ""
-    ).strip().upper()
 
     returned_invoice_id = (
-        invoice.get("invoice_id")
-        or response.get("invoice_id")
-    )
-
-    returned_api_ref = (
-        invoice.get("api_ref")
-        or response.get("api_ref")
-        or response.get("api_reference")
-    )
-
-    expected_api_ref = payment_session.get(
-        "merchant_request_id"
+        extract_intasend_invoice_id(
+            response
+        )
+        or invoice.get("invoice_id")
+        or invoice.get("id")
     )
 
     if (
         returned_invoice_id
-        and str(returned_invoice_id).strip()
-        != str(invoice_id).strip()
+        and str(returned_invoice_id)
+        != str(invoice_id)
     ):
         return {
             "success": False,
-            "error": "IntaSend invoice mismatch.",
+            "message": (
+                "IntaSend returned a different invoice ID."
+            ),
         }
 
+    state = str(
+        invoice.get(
+            "state",
+            response.get("state", "")
+            if isinstance(response, dict)
+            else "",
+        )
+    ).upper()
+
+    if state != "COMPLETE":
+        return {
+            "success": False,
+            "message": (
+                "IntaSend has not confirmed this payment "
+                "as COMPLETE."
+            ),
+            "state": state or "UNKNOWN",
+        }
+
+    stored_api_ref = (
+        payment_session.get(
+            "merchant_request_id"
+        )
+    )
+
+    returned_api_ref = (
+        invoice.get("api_ref")
+        or invoice.get("api_reference")
+        or extract_intasend_api_ref(
+            response
+        )
+    )
+
     if (
-        expected_api_ref
+        stored_api_ref
         and returned_api_ref
-        and str(returned_api_ref).strip()
-        != str(expected_api_ref).strip()
+        and str(returned_api_ref)
+        != str(stored_api_ref)
     ):
         return {
             "success": False,
-            "error": "IntaSend payment reference mismatch.",
+            "message": (
+                "IntaSend API reference does not "
+                "match the payment session."
+            ),
         }
+
+    stored_amount = normalize_amount(
+        payment_session.get(
+            "amount"
+        )
+    )
 
     returned_amount = (
         invoice.get("value")
-        or invoice.get("amount")
-        or response.get("value")
-        or response.get("amount")
+        if invoice.get("value") is not None
+        else invoice.get("amount")
+    )
+
+    if returned_amount is None and isinstance(
+        response,
+        dict,
+    ):
+        returned_amount = (
+            response.get("value")
+            if response.get("value") is not None
+            else response.get("amount")
+        )
+
+    if (
+        returned_amount is not None
+        and not amounts_match(
+            stored_amount,
+            returned_amount,
+        )
+    ):
+        return {
+            "success": False,
+            "message": (
+                "IntaSend payment amount does not "
+                "match the payment session."
+            ),
+        }
+
+    returned_currency = (
+        invoice.get("currency")
+        or (
+            response.get("currency")
+            if isinstance(response, dict)
+            else None
+        )
+    )
+
+    if (
+        returned_currency
+        and str(returned_currency).upper()
+        != "KES"
+    ):
+        return {
+            "success": False,
+            "message": (
+                "Payment currency is not KES."
+            ),
+        }
+
+    returned_provider = (
+        invoice.get("provider")
+        or (
+            response.get("provider")
+            if isinstance(response, dict)
+            else None
+        )
+    )
+
+    if returned_provider:
+        provider_text = str(
+            returned_provider
+        ).upper().replace(
+            "_",
+            "-",
+        )
+
+        allowed_providers = {
+            "MPESA",
+            "M-PESA",
+            "MPESA-STK",
+            "M-PESA-STK",
+        }
+
+        if provider_text not in allowed_providers:
+            return {
+                "success": False,
+                "message": (
+                    "Payment provider is not M-Pesa."
+                ),
+            }
+
+    return {
+        "success": True,
+        "state": state,
+        "invoice_id": str(
+            returned_invoice_id
+            or invoice_id
+        ),
+        "api_ref": (
+            str(returned_api_ref)
+            if returned_api_ref
+            else None
+        ),
+        "amount": (
+            float(
+                normalize_amount(
+                    returned_amount
+                )
+            )
+            if returned_amount is not None
+            else None
+        ),
+        "currency": returned_currency,
+        "provider": returned_provider,
+        "raw": response,
+    }
+
+
+# ============================================================
+# SYNC PAYMENT FROM INTASEND
+# ============================================================
+
+def sync_payment_from_intasend(
+    payment_session
+):
+    invoice_id = (
+        payment_session.get(
+            "checkout_request_id"
+        )
+    )
+
+    if not invoice_id:
+        return {
+            "status": "FAILED",
+            "message": (
+                "Payment has no IntaSend invoice ID."
+            ),
+        }
+
+    try:
+        service = get_intasend_service()
+
+        response = service.collect.status(
+            invoice_id=str(invoice_id)
+        )
+
+    except Exception as exc:
+        return {
+            "status": "PENDING",
+            "message": (
+                "Payment status is temporarily unavailable."
+            ),
+            "error": str(exc),
+        }
+
+    invoice = extract_intasend_invoice(
+        response
+    )
+
+    returned_invoice_id = (
+        extract_intasend_invoice_id(
+            response
+        )
+        or invoice.get("invoice_id")
+        or invoice.get("id")
+    )
+
+    if (
+        returned_invoice_id
+        and str(returned_invoice_id)
+        != str(invoice_id)
+    ):
+        return {
+            "status": "FAILED",
+            "message": (
+                "IntaSend invoice verification failed."
+            ),
+        }
+
+    returned_api_ref = (
+        invoice.get("api_ref")
+        or invoice.get("api_reference")
+        or extract_intasend_api_ref(
+            response
+        )
+    )
+
+    stored_api_ref = (
+        payment_session.get(
+            "merchant_request_id"
+        )
+    )
+
+    if (
+        stored_api_ref
+        and returned_api_ref
+        and str(returned_api_ref)
+        != str(stored_api_ref)
+    ):
+        return {
+            "status": "FAILED",
+            "message": (
+                "IntaSend API reference verification failed."
+            ),
+        }
+
+    stored_amount = normalize_amount(
+        payment_session.get(
+            "amount"
+        )
+    )
+
+    returned_amount = (
+        invoice.get("value")
+        if invoice.get("value") is not None
+        else invoice.get("amount")
     )
 
     if returned_amount is not None:
         if not amounts_match(
+            stored_amount,
             returned_amount,
-            payment_session.get("amount"),
         ):
             return {
-                "success": False,
-                "error": "IntaSend payment amount mismatch.",
+                "status": "FAILED",
+                "message": (
+                    "IntaSend payment amount does not "
+                    "match the payment session."
+                ),
             }
 
-    if state == "COMPLETE":
-        result = process_completed_payment(
-            payment_session["id"],
-            invoice_id=invoice_id,
+    returned_currency = (
+        invoice.get("currency")
+        or (
+            response.get("currency")
+            if isinstance(response, dict)
+            else None
+        )
+    )
+
+    if (
+        returned_currency
+        and str(returned_currency).upper()
+        != "KES"
+    ):
+        return {
+            "status": "FAILED",
+            "message": (
+                "Payment currency is not KES."
+            ),
+        }
+
+    returned_provider = (
+        invoice.get("provider")
+        or (
+            response.get("provider")
+            if isinstance(response, dict)
+            else None
+        )
+    )
+
+    if returned_provider:
+        provider_text = str(
+            returned_provider
+        ).upper().replace(
+            "_",
+            "-",
         )
 
-        if result.get("success"):
-            result["state"] = "COMPLETE"
+        allowed_providers = {
+            "MPESA",
+            "M-PESA",
+            "MPESA-STK",
+            "M-PESA-STK",
+        }
 
-        return result
+        if provider_text not in allowed_providers:
+            return {
+                "status": "FAILED",
+                "message": (
+                    "Payment provider is not M-Pesa."
+                ),
+            }
 
-    if state == "FAILED":
-        conn = get_db()
+    state = str(
+        invoice.get(
+            "state",
+            response.get("state", "")
+            if isinstance(response, dict)
+            else "",
+        )
+    ).upper()
 
-        try:
-            conn.execute(
-                """
-                UPDATE payment_sessions
-                SET status = 'FAILED'
-                WHERE id = %s
-                  AND status <> 'COMPLETED'
-                """,
-                (payment_session["id"],),
+    if state == "COMPLETE":
+        verification = (
+            verify_intasend_completed_payment(
+                payment_session,
+                invoice_id=str(invoice_id),
             )
+        )
 
-            conn.commit()
+        if not verification.get("success"):
+            return {
+                "status": "FAILED",
+                "message": verification.get(
+                    "message",
+                    "Payment verification failed.",
+                ),
+            }
 
-        finally:
-            conn.close()
+        result = process_completed_payment(
+            payment_session["id"],
+            invoice_id=str(invoice_id),
+        )
+
+        if not result.get("success"):
+            return {
+                "status": "FAILED",
+                "message": result.get(
+                    "message",
+                    "Payment could not be completed.",
+                ),
+            }
 
         return {
-            "success": True,
-            "state": "FAILED",
+            "status": "COMPLETE",
+            "wallet_balance": result.get(
+                "balance",
+                0,
+            ),
+            "already_processed": result.get(
+                "already_processed",
+                False,
+            ),
+        }
+
+    if state in {
+        "FAILED",
+        "CANCELED",
+        "CANCELLED",
+    }:
+        return {
             "status": "FAILED",
+            "message": (
+                "IntaSend reports that the payment failed."
+            ),
         }
 
     return {
-        "success": True,
-        "state": state or "PENDING",
         "status": state or "PENDING",
     }
 
@@ -871,23 +1411,31 @@ def sync_payment_from_intasend(payment_session):
 # BASIC ROUTES
 # ============================================================
 
-@app.get("/")
+@app.route("/")
 def home():
     return jsonify({
-        "message": "SOMA HUB Flask backend is running",
         "success": True,
+        "service": "SOMA HUB API",
+        "status": "running",
     })
 
 
-@app.get("/api/test")
+@app.route("/api/test")
 def api_test():
     return jsonify({
         "success": True,
-        "message": "SOMA HUB API is working",
+        "message": "SOMA HUB API is working.",
     })
 
 
-@app.get("/api/intasend-config-test")
+# ============================================================
+# INTASEND CONFIG TEST
+# ============================================================
+
+@app.route(
+    "/api/intasend-config-test",
+    methods=["GET"],
+)
 def intasend_config_test():
     return jsonify({
         "success": True,
@@ -900,7 +1448,9 @@ def intasend_config_test():
         "webhook_challenge_configured": bool(
             INTASEND_WEBHOOK_CHALLENGE
         ),
-        "test_environment": INTASEND_TEST_ENVIRONMENT,
+        "test_environment": (
+            INTASEND_TEST_ENVIRONMENT
+        ),
         "redirect_url": PAYMENT_REDIRECT_URL,
     })
 
@@ -909,79 +1459,103 @@ def intasend_config_test():
 # STUDENT REGISTRATION
 # ============================================================
 
-@app.post("/api/students/register")
+@app.route(
+    "/api/students/register",
+    methods=["POST"],
+)
 def register_student():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(
+        silent=True
+    ) or {}
 
     soma_hub_code = str(
-        data.get("somaHubCode")
-        or data.get("soma_hub_code")
-        or ""
-    ).strip()
+        data.get(
+            "soma_hub_code",
+            "",
+        )
+    ).strip().upper()
 
     name = str(
-        data.get("name")
-        or ""
-    ).strip()
-
-    grade = str(
-        data.get("grade")
-        or ""
+        data.get(
+            "name",
+            "",
+        )
     ).strip()
 
     school_name = str(
-        data.get("schoolName")
-        or data.get("school_name")
-        or data.get("school")
-        or ""
+        data.get(
+            "school_name",
+            data.get(
+                "school",
+                "",
+            ),
+        )
+    ).strip()
+
+    grade = str(
+        data.get(
+            "grade",
+            "",
+        )
     ).strip()
 
     if not soma_hub_code:
         return jsonify({
             "success": False,
-            "error": "SOMA HUB code is required.",
+            "message": (
+                "SOMA HUB code is required."
+            ),
         }), 400
 
     if not name:
         return jsonify({
             "success": False,
-            "error": "Student name is required.",
+            "message": (
+                "Student name is required."
+            ),
         }), 400
 
-    conn = get_db()
+    conn = database.get_connection()
 
     try:
-        existing = get_student_by_code(
-            conn,
-            soma_hub_code,
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT id
+            FROM students
+            WHERE soma_hub_code = %s
+            LIMIT 1
+            """,
+            (
+                soma_hub_code,
+            ),
         )
 
-        if existing:
-            student_id = existing["id"]
+        existing = cur.fetchone()
 
-            conn.execute(
+        if existing:
+            cur.execute(
                 """
                 UPDATE students
                 SET
                     name = %s,
                     school_name = %s,
                     school = %s,
-                    grade = %s,
-                    updated_at = %s
-                WHERE id = %s
+                    grade = %s
+                WHERE soma_hub_code = %s
                 """,
                 (
                     name,
                     school_name,
                     school_name,
                     grade,
-                    now_string(),
-                    student_id,
+                    soma_hub_code,
                 ),
             )
 
         else:
-            row = conn.execute(
+            cur.execute(
                 """
                 INSERT INTO students (
                     soma_hub_code,
@@ -989,8 +1563,7 @@ def register_student():
                     school_name,
                     school,
                     grade,
-                    created_at,
-                    updated_at
+                    created_at
                 )
                 VALUES (
                     %s,
@@ -998,10 +1571,8 @@ def register_student():
                     %s,
                     %s,
                     %s,
-                    %s,
                     %s
                 )
-                RETURNING id
                 """,
                 (
                     soma_hub_code,
@@ -1010,23 +1581,14 @@ def register_student():
                     school_name,
                     grade,
                     now_string(),
-                    now_string(),
                 ),
-            ).fetchone()
-
-            student_id = row["id"]
+            )
 
         conn.commit()
 
         return jsonify({
             "success": True,
-            "student": {
-                "id": student_id,
-                "somaHubCode": soma_hub_code,
-                "name": name,
-                "schoolName": school_name,
-                "grade": grade,
-            },
+            "soma_hub_code": soma_hub_code,
         })
 
     except Exception:
@@ -1035,347 +1597,506 @@ def register_student():
 
     finally:
         conn.close()
-
 
 # ============================================================
 # STUDENT PERFORMANCE
 # ============================================================
 
-@app.post("/api/students/performance")
+@app.route(
+    "/api/students/performance",
+    methods=["POST"],
+)
 def save_student_performance():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(
+        silent=True
+    ) or {}
 
     soma_hub_code = str(
-        data.get("somaHubCode")
-        or data.get("soma_hub_code")
-        or ""
-    ).strip()
-
-    term_points = data.get("termPoints") or []
-    quiz_results = data.get("quizResults") or []
+        data.get(
+            "soma_hub_code",
+            "",
+        )
+    ).strip().upper()
 
     if not soma_hub_code:
         return jsonify({
             "success": False,
-            "error": "SOMA HUB code is required.",
+            "message": (
+                "SOMA HUB code is required."
+            ),
         }), 400
 
-    if not isinstance(term_points, list):
-        return jsonify({
-            "success": False,
-            "error": "termPoints must be an array.",
-        }), 400
+    term_points = data.get(
+        "term_points",
+        {},
+    ) or {}
 
-    if not isinstance(quiz_results, list):
-        return jsonify({
-            "success": False,
-            "error": "quizResults must be an array.",
-        }), 400
+    quiz_results = data.get(
+        "quiz_results",
+        [],
+    ) or {}
 
-    conn = get_db()
+    conn = database.get_connection()
 
     try:
-        student = get_student_by_code(
-            conn,
-            soma_hub_code,
+        cur = conn.cursor()
+
+        # ----------------------------------------------------
+        # FIND STUDENT
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            SELECT id
+            FROM students
+            WHERE soma_hub_code = %s
+            LIMIT 1
+            """,
+            (
+                soma_hub_code,
+            ),
         )
 
+        student = cur.fetchone()
+
         if not student:
+            conn.rollback()
+
             return jsonify({
                 "success": False,
-                "error": "Student not found.",
+                "message": (
+                    "Student not found."
+                ),
             }), 404
 
         student_id = student["id"]
 
-        for item in term_points:
-            if not isinstance(item, dict):
+        # ----------------------------------------------------
+        # TERM POINTS
+        #
+        # Existing SOMA HUB tracking uses:
+        #
+        #   term_points
+        #
+        # and the existing categories are:
+        #
+        #   study_notes_points
+        #   topical_quiz_points
+        #   exam_points
+        #   consistency_points
+        #   improvement_points
+        #   total_points
+        #
+        # Do NOT create a new student_performance table.
+        # ----------------------------------------------------
+
+        if isinstance(
+            term_points,
+            dict,
+        ):
+            term_items = term_points.items()
+        else:
+            term_items = []
+
+        saved_terms = []
+
+        for term_key, raw_term in term_items:
+
+            if not isinstance(
+                raw_term,
+                dict,
+            ):
                 continue
 
             term_key = str(
-                item.get("termKey")
-                or item.get("term_key")
-                or ""
+                term_key
             ).strip()
 
             if not term_key:
                 continue
 
-            study_notes = min(
-                max(
-                    float(
-                        item.get("studyNotes")
-                        or item.get("study_notes_points")
-                        or 0
-                    ),
+            def clean_points(
+                value,
+                maximum,
+            ):
+                try:
+                    number = float(
+                        value or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    number = 0
+
+                return max(
                     0,
+                    min(
+                        maximum,
+                        number,
+                    ),
+                )
+
+            study_notes_points = clean_points(
+                raw_term.get(
+                    "studyNotes",
+                    raw_term.get(
+                        "study_notes_points",
+                        0,
+                    ),
                 ),
                 20,
             )
 
-            topical_quizzes = min(
-                max(
-                    float(
-                        item.get("topicalQuizzes")
-                        or item.get("topical_quiz_points")
-                        or 0
+            topical_quiz_points = clean_points(
+                raw_term.get(
+                    "topicalQuizzes",
+                    raw_term.get(
+                        "topical_quiz_points",
+                        0,
                     ),
-                    0,
                 ),
                 25,
             )
 
-            exams = min(
-                max(
-                    float(
-                        item.get("exams")
-                        or item.get("exam_points")
-                        or 0
+            exam_points = clean_points(
+                raw_term.get(
+                    "exams",
+                    raw_term.get(
+                        "exam_points",
+                        0,
                     ),
-                    0,
                 ),
                 25,
             )
 
-            consistency = min(
-                max(
-                    float(
-                        item.get("consistency")
-                        or item.get("consistency_points")
-                        or 0
+            consistency_points = clean_points(
+                raw_term.get(
+                    "consistency",
+                    raw_term.get(
+                        "consistency_points",
+                        0,
                     ),
-                    0,
                 ),
                 15,
             )
 
-            improvement = min(
-                max(
-                    float(
-                        item.get("progress")
-                        or item.get("improvement")
-                        or item.get("improvement_points")
-                        or 0
+            # The existing database has one 15-point
+            # improvement field. Support both frontend
+            # names without creating another database field.
+            improvement_points = clean_points(
+                raw_term.get(
+                    "improvement",
+                    raw_term.get(
+                        "progress",
+                        raw_term.get(
+                            "improvement_points",
+                            0,
+                        ),
                     ),
-                    0,
                 ),
                 15,
             )
 
-            total = min(
-                study_notes
-                + topical_quizzes
-                + exams
-                + consistency
-                + improvement,
+            total_points = min(
                 100,
-            )
-
-            conn.execute(
-                """
-                INSERT INTO term_points (
-                    student_id,
-                    term_key,
-                    study_notes_points,
-                    topical_quiz_points,
-                    exam_points,
-                    consistency_points,
-                    improvement_points,
-                    total_points
-                )
-                VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s
-                )
-                ON CONFLICT (
-                    student_id,
-                    term_key
-                )
-                DO UPDATE SET
-                    study_notes_points =
-                        EXCLUDED.study_notes_points,
-                    topical_quiz_points =
-                        EXCLUDED.topical_quiz_points,
-                    exam_points =
-                        EXCLUDED.exam_points,
-                    consistency_points =
-                        EXCLUDED.consistency_points,
-                    improvement_points =
-                        EXCLUDED.improvement_points,
-                    total_points =
-                        EXCLUDED.total_points
-                """,
                 (
-                    student_id,
-                    term_key,
-                    study_notes,
-                    topical_quizzes,
-                    exams,
-                    consistency,
-                    improvement,
-                    total,
+                    study_notes_points
+                    + topical_quiz_points
+                    + exam_points
+                    + consistency_points
+                    + improvement_points
                 ),
             )
 
-        for item in quiz_results:
-            if not isinstance(item, dict):
-                continue
+            # ------------------------------------------------
+            # UPSERT EXISTING TERM RECORD
+            # ------------------------------------------------
 
-            material_id = str(
-                item.get("materialId")
-                or item.get("material_id")
-                or ""
-            ).strip()
-
-            if not material_id:
-                continue
-
-            material_title = str(
-                item.get("materialTitle")
-                or item.get("material_title")
-                or ""
-            ).strip()
-
-            subject = str(
-                item.get("subject")
-                or ""
-            ).strip()
-
-            grade_key = str(
-                item.get("gradeKey")
-                or item.get("grade_key")
-                or ""
-            ).strip()
-
-            quiz_type = str(
-                item.get("quizType")
-                or item.get("quiz_type")
-                or "TOPICAL"
-            ).strip()
-
-            score = float(
-                item.get("score") or 0
-            )
-
-            total = float(
-                item.get("total") or 0
-            )
-
-            percentage = float(
-                item.get("percentage")
-                or (
-                    (score / total * 100)
-                    if total > 0
-                    else 0
-                )
-            )
-
-            completed_at = (
-                item.get("completedAt")
-                or item.get("completed_at")
-                or now_string()
-            )
-
-            duplicate = conn.execute(
+            cur.execute(
                 """
                 SELECT id
-                FROM quiz_results
-                WHERE student_id = %s
-                  AND material_id = %s
-                  AND quiz_type = %s
-                  AND completed_at = %s
+                FROM term_points
+                WHERE
+                    student_id = %s
+                    AND term_key = %s
                 LIMIT 1
                 """,
                 (
                     student_id,
-                    material_id,
-                    quiz_type,
-                    completed_at,
-                ),
-            ).fetchone()
-
-            if duplicate:
-                continue
-
-            conn.execute(
-                """
-                INSERT INTO quiz_results (
-                    student_id,
-                    material_id,
-                    material_title,
-                    subject,
-                    grade_key,
-                    quiz_type,
-                    score,
-                    total,
-                    percentage,
-                    completed_at
-                )
-                VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s
-                )
-                """,
-                (
-                    student_id,
-                    material_id,
-                    material_title,
-                    subject,
-                    grade_key,
-                    quiz_type,
-                    score,
-                    total,
-                    percentage,
-                    completed_at,
+                    term_key,
                 ),
             )
 
+            existing_term = cur.fetchone()
+
+            if existing_term:
+                cur.execute(
+                    """
+                    UPDATE term_points
+                    SET
+                        study_notes_points = %s,
+                        topical_quiz_points = %s,
+                        exam_points = %s,
+                        consistency_points = %s,
+                        improvement_points = %s,
+                        total_points = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        study_notes_points,
+                        topical_quiz_points,
+                        exam_points,
+                        consistency_points,
+                        improvement_points,
+                        total_points,
+                        existing_term["id"],
+                    ),
+                )
+
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO term_points (
+                        student_id,
+                        term_key,
+                        study_notes_points,
+                        topical_quiz_points,
+                        exam_points,
+                        consistency_points,
+                        improvement_points,
+                        total_points
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    """,
+                    (
+                        student_id,
+                        term_key,
+                        study_notes_points,
+                        topical_quiz_points,
+                        exam_points,
+                        consistency_points,
+                        improvement_points,
+                        total_points,
+                    ),
+                )
+
+            saved_terms.append({
+                "term_key": term_key,
+                "studyNotes": study_notes_points,
+                "topicalQuizzes": topical_quiz_points,
+                "exams": exam_points,
+                "consistency": consistency_points,
+                "improvement": improvement_points,
+                "total": total_points,
+            })
+
+        # ----------------------------------------------------
+        # QUIZ RESULTS
+        #
+        # Use the existing quiz_results table.
+        # Do NOT create student_quiz_results.
+        # ----------------------------------------------------
+
+        if isinstance(
+            quiz_results,
+            list,
+        ):
+            for result in quiz_results:
+
+                if not isinstance(
+                    result,
+                    dict,
+                ):
+                    continue
+
+                material_id = str(
+                    result.get(
+                        "material_id",
+                        result.get(
+                            "materialId",
+                            "",
+                        ),
+                    )
+                ).strip()
+
+                if not material_id:
+                    continue
+
+                material_title = str(
+                    result.get(
+                        "material_title",
+                        result.get(
+                            "materialTitle",
+                            "",
+                        ),
+                    )
+                ).strip()
+
+                subject = str(
+                    result.get(
+                        "subject",
+                        "",
+                    )
+                ).strip()
+
+                grade_key = str(
+                    result.get(
+                        "grade_key",
+                        result.get(
+                            "gradeKey",
+                            "",
+                        ),
+                    )
+                ).strip()
+
+                quiz_type = str(
+                    result.get(
+                        "quiz_type",
+                        result.get(
+                            "type",
+                            "topical",
+                        ),
+                    )
+                ).strip()
+
+                try:
+                    score = float(
+                        result.get(
+                            "score",
+                            0,
+                        ) or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    score = 0
+
+                try:
+                    total = float(
+                        result.get(
+                            "total",
+                            0,
+                        ) or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    total = 0
+
+                try:
+                    percentage = float(
+                        result.get(
+                            "percentage",
+                            0,
+                        ) or 0
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    percentage = 0
+
+                completed_at = (
+                    result.get(
+                        "completed_at"
+                    )
+                    or result.get(
+                        "completedAt"
+                    )
+                    or now_string()
+                )
+
+                # ------------------------------------------------
+                # DUPLICATE CHECK
+                # ------------------------------------------------
+
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM quiz_results
+                    WHERE
+                        student_id = %s
+                        AND material_id = %s
+                        AND quiz_type = %s
+                        AND completed_at = %s
+                    LIMIT 1
+                    """,
+                    (
+                        student_id,
+                        material_id,
+                        quiz_type,
+                        completed_at,
+                    ),
+                )
+
+                duplicate = cur.fetchone()
+
+                if duplicate:
+                    continue
+
+                # ------------------------------------------------
+                # INSERT EXISTING QUIZ RESULT
+                # ------------------------------------------------
+
+                cur.execute(
+                    """
+                    INSERT INTO quiz_results (
+                        student_id,
+                        material_id,
+                        material_title,
+                        subject,
+                        grade_key,
+                        quiz_type,
+                        score,
+                        total,
+                        percentage,
+                        completed_at
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    """,
+                    (
+                        student_id,
+                        material_id,
+                        material_title,
+                        subject,
+                        grade_key,
+                        quiz_type,
+                        score,
+                        total,
+                        percentage,
+                        completed_at,
+                    ),
+                )
+
         conn.commit()
-
-        saved_terms = conn.execute(
-            """
-            SELECT *
-            FROM term_points
-            WHERE student_id = %s
-            ORDER BY term_key
-            """,
-            (student_id,),
-        ).fetchall()
-
-        saved_quizzes = conn.execute(
-            """
-            SELECT *
-            FROM quiz_results
-            WHERE student_id = %s
-            ORDER BY completed_at DESC
-            """,
-            (student_id,),
-        ).fetchall()
 
         return jsonify({
             "success": True,
-            "termPoints": [
-                dict(row)
-                for row in saved_terms
-            ],
-            "quizResults": [
-                dict(row)
-                for row in saved_quizzes
-            ],
+            "soma_hub_code": soma_hub_code,
+            "term_points": saved_terms,
         })
 
     except Exception:
@@ -1384,239 +2105,234 @@ def save_student_performance():
 
     finally:
         conn.close()
-
-
-# ============================================================
-# GET STUDENT PERFORMANCE
-# ============================================================
-
-@app.get(
-    "/api/students/performance/<soma_hub_code>"
-)
-def get_student_performance(soma_hub_code):
-    soma_hub_code = str(
-        soma_hub_code
-    ).strip()
-
-    conn = get_db()
-
-    try:
-        student = get_student_by_code(
-            conn,
-            soma_hub_code,
-        )
-
-        if not student:
-            return jsonify({
-                "success": False,
-                "error": "Student not found.",
-            }), 404
-
-        student_id = student["id"]
-
-        terms = conn.execute(
-            """
-            SELECT *
-            FROM term_points
-            WHERE student_id = %s
-            ORDER BY term_key
-            """,
-            (student_id,),
-        ).fetchall()
-
-        quizzes = conn.execute(
-            """
-            SELECT *
-            FROM quiz_results
-            WHERE student_id = %s
-            ORDER BY completed_at DESC
-            """,
-            (student_id,),
-        ).fetchall()
-
-        return jsonify({
-            "success": True,
-            "student": dict(student),
-            "termPoints": [
-                dict(row)
-                for row in terms
-            ],
-            "quizResults": [
-                dict(row)
-                for row in quizzes
-            ],
-        })
-
-    finally:
-        conn.close()
-
-
-# ============================================================
+        
+    # ============================================================
 # ADMIN LOGIN
 # ============================================================
 
 @app.post("/api/admin/login")
 def admin_login():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(
+        silent=True
+    ) or {}
 
     username = str(
-        data.get("username")
-        or ""
+        data.get(
+            "username",
+            ""
+        )
     ).strip()
 
     password = str(
-        data.get("password")
-        or ""
+        data.get(
+            "password",
+            ""
+        )
     )
 
     if not username or not password:
         return jsonify({
             "success": False,
-            "error": (
+            "message": (
                 "Username and password are required."
             ),
         }), 400
 
-    conn = get_db()
+    admin_username = os.getenv(
+        "ADMIN_USERNAME",
+        ""
+    ).strip()
 
-    try:
-        admin = conn.execute(
-            """
-            SELECT *
-            FROM admins
-            WHERE username = %s
-            LIMIT 1
-            """,
-            (username,),
-        ).fetchone()
+    admin_password_hash = os.getenv(
+        "ADMIN_PASSWORD_HASH",
+        ""
+    ).strip()
 
-        if not admin:
-            return jsonify({
-                "success": False,
-                "error": "Invalid credentials.",
-            }), 401
-
-        if not check_password_hash(
-            admin["password_hash"],
+    if (
+        not admin_username
+        or not admin_password_hash
+        or username != admin_username
+        or not check_password_hash(
+            admin_password_hash,
             password,
-        ):
-            return jsonify({
-                "success": False,
-                "error": "Invalid credentials.",
-            }), 401
-
-        session["admin_id"] = admin["id"]
-        session["admin_username"] = admin["username"]
-
-        return jsonify({
-            "success": True,
-            "admin": {
-                "id": admin["id"],
-                "username": admin["username"],
-            },
-        })
-
-    finally:
-        conn.close()
-
-
-@app.get("/api/admin/me")
-def admin_me():
-    admin_id = session.get("admin_id")
-
-    if not admin_id:
+        )
+    ):
         return jsonify({
             "success": False,
-            "authenticated": False,
+            "message": "Invalid admin credentials.",
         }), 401
+
+    session["admin_authenticated"] = True
+    session["admin_username"] = username
 
     return jsonify({
         "success": True,
         "authenticated": True,
-        "admin": {
-            "id": admin_id,
-            "username": session.get(
-                "admin_username"
-            ),
-        },
+        "username": username,
+    })
+
+
+@app.get("/api/admin/me")
+def admin_me():
+    authenticated = (
+        session.get(
+            "admin_authenticated"
+        )
+        is True
+    )
+
+    return jsonify({
+        "success": True,
+        "authenticated": authenticated,
+        "username": (
+            session.get("admin_username")
+            if authenticated
+            else None
+        ),
     })
 
 
 @app.post("/api/admin/logout")
 def admin_logout():
-    session.clear()
+    session.pop(
+        "admin_authenticated",
+        None,
+    )
+
+    session.pop(
+        "admin_username",
+        None,
+    )
 
     return jsonify({
         "success": True,
-        "message": "Logged out successfully.",
+        "authenticated": False,
     })
+
+
+def require_admin():
+    if (
+        session.get(
+            "admin_authenticated"
+        )
+        is not True
+    ):
+        return jsonify({
+            "success": False,
+            "message": "Admin authentication required.",
+        }), 401
+
+    return None
 
 
 # ============================================================
 # ADMIN STUDENT LOOKUP
 # ============================================================
 
-@app.get(
-    "/api/admin/students/<soma_hub_code>"
-)
-def admin_student_lookup(soma_hub_code):
-    if not session.get("admin_id"):
-        return jsonify({
-            "success": False,
-            "error": "Admin authentication required.",
-        }), 401
+@app.get("/api/admin/students/<soma_hub_code>")
+def admin_student_lookup(
+    soma_hub_code
+):
+    auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
 
     soma_hub_code = str(
         soma_hub_code
-    ).strip()
+    ).strip().upper()
 
-    conn = get_db()
+    conn = database.get_connection()
 
     try:
-        student = get_student_by_code(
-            conn,
-            soma_hub_code,
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT
+                id,
+                soma_hub_code,
+                name,
+                school_name,
+                school,
+                grade,
+                created_at
+            FROM students
+            WHERE soma_hub_code = %s
+            LIMIT 1
+            """,
+            (
+                soma_hub_code,
+            ),
         )
+
+        student = cur.fetchone()
 
         if not student:
             return jsonify({
                 "success": False,
-                "error": "Student not found.",
+                "message": "Student not found.",
             }), 404
 
         student_id = student["id"]
 
-        terms = conn.execute(
+        cur.execute(
             """
-            SELECT *
+            SELECT
+                term_key,
+                study_notes_points,
+                topical_quiz_points,
+                exam_points,
+                consistency_points,
+                improvement_points,
+                total_points
             FROM term_points
             WHERE student_id = %s
             ORDER BY term_key
             """,
-            (student_id,),
-        ).fetchall()
+            (
+                student_id,
+            ),
+        )
 
-        quizzes = conn.execute(
+        terms = cur.fetchall()
+
+        cur.execute(
             """
-            SELECT *
+            SELECT
+                material_id,
+                material_title,
+                subject,
+                grade_key,
+                quiz_type,
+                score,
+                total,
+                percentage,
+                completed_at
             FROM quiz_results
             WHERE student_id = %s
             ORDER BY completed_at DESC
             """,
-            (student_id,),
-        ).fetchall()
+            (
+                student_id,
+            ),
+        )
+
+        quizzes = cur.fetchall()
+
+        wallet_balance = calculate_wallet_balance(
+            conn,
+            soma_hub_code,
+        )
 
         return jsonify({
             "success": True,
-            "student": dict(student),
-            "termPoints": [
-                dict(row)
-                for row in terms
-            ],
-            "quizResults": [
-                dict(row)
-                for row in quizzes
-            ],
+            "student": student,
+            "wallet_balance": wallet_balance,
+            "coins": wallet_balance,
+            "ksh": wallet_balance,
+            "term_points": terms,
+            "quiz_results": quizzes,
         })
 
     finally:
@@ -1627,18 +2343,19 @@ def admin_student_lookup(soma_hub_code):
 # ADMIN TOP STUDENTS
 # ============================================================
 
-@app.get("/api/admin/top-students")
+@app.get("/api/admin/students/top")
 def admin_top_students():
-    if not session.get("admin_id"):
-        return jsonify({
-            "success": False,
-            "error": "Admin authentication required.",
-        }), 401
+    auth_error = require_admin()
 
-    conn = get_db()
+    if auth_error:
+        return auth_error
+
+    conn = database.get_connection()
 
     try:
-        rows = conn.execute(
+        cur = conn.cursor()
+
+        cur.execute(
             """
             SELECT
                 s.id,
@@ -1648,7 +2365,12 @@ def admin_top_students():
                 s.school,
                 s.grade,
                 COALESCE(
-                    SUM(tp.total_points),
+                    SUM(
+                        COALESCE(
+                            tp.total_points,
+                            0
+                        )
+                    ),
                     0
                 ) AS total_points
             FROM students s
@@ -1666,14 +2388,13 @@ def admin_top_students():
                 s.name ASC
             LIMIT 50
             """
-        ).fetchall()
+        )
+
+        students = cur.fetchall()
 
         return jsonify({
             "success": True,
-            "students": [
-                dict(row)
-                for row in rows
-            ],
+            "students": students,
         })
 
     finally:
@@ -1681,7 +2402,7 @@ def admin_top_students():
 
 
 # ============================================================
-# CREATE INTASEND PAYMENT SESSION
+# INTASEND PAYMENT SESSION
 # ============================================================
 
 @app.post(
@@ -1693,134 +2414,160 @@ def create_payment_session():
     ) or {}
 
     soma_hub_code = str(
-        data.get("somaHubCode")
-        or data.get("soma_hub_code")
-        or ""
-    ).strip()
+        data.get(
+            "soma_hub_code",
+            ""
+        )
+    ).strip().upper()
 
-    raw_purpose = data.get("purpose")
-
-    purpose = normalize_payment_purpose(
-        raw_purpose
+    phone = normalize_phone(
+        data.get("phone")
     )
 
-    raw_amount = data.get("amount")
+    purpose = normalize_payment_purpose(
+        data.get("purpose")
+    )
 
-    phone = normalize_kenyan_phone(
-        data.get("phone")
-        or data.get("phoneNumber")
-        or data.get("phone_number")
+    amount = normalize_amount(
+        data.get("amount")
     )
 
     if not soma_hub_code:
         return jsonify({
             "success": False,
-            "error": "SOMA HUB code is required.",
-            "field": "somaHubCode",
-        }), 400
-
-    if not validate_payment_purpose(purpose):
-        app.logger.warning(
-            "Rejected payment session with invalid purpose: %s",
-            purpose,
-        )
-
-        return jsonify({
-            "success": False,
-            "error": "Invalid payment purpose.",
-            "field": "purpose",
-        }), 400
-
-    if purpose == "subscribe":
-        app.logger.warning(
-            "Rejected subscription payment session for %s.",
-            soma_hub_code,
-        )
-
-        return jsonify({
-            "success": False,
-            "error": (
-                "Subscription payments are not available "
-                "through this payment flow."
+            "message": (
+                "SOMA HUB code is required."
             ),
-            "field": "purpose",
-        }), 400
-
-    amount = normalize_amount(
-        raw_amount
-    )
-
-    if amount is None:
-        return jsonify({
-            "success": False,
-            "error": "Invalid payment amount.",
-            "field": "amount",
-        }), 400
-
-    if (
-        amount < Decimal("1")
-        or amount > Decimal("150000")
-    ):
-        return jsonify({
-            "success": False,
-            "error": (
-                "Payment amount must be between "
-                "KSh 1 and KSh 150,000."
-            ),
-            "field": "amount",
         }), 400
 
     if not phone:
         return jsonify({
             "success": False,
-            "error": (
-                "Enter a valid Kenyan M-Pesa "
-                "phone number."
+            "message": (
+                "A valid Kenyan M-Pesa number is required."
             ),
-            "field": "phone",
         }), 400
 
-    conn = get_db()
+    if amount is None:
+        return jsonify({
+            "success": False,
+            "message": (
+                "A valid payment amount is required."
+            ),
+        }), 400
 
-    payment_session_id = None
-    session_id = None
+    if not is_whole_shilling(
+        amount
+    ):
+        return jsonify({
+            "success": False,
+            "message": (
+                "Payment amounts must be whole "
+                "Kenya shillings."
+            ),
+        }), 400
+
+    if amount < Decimal("1"):
+        return jsonify({
+            "success": False,
+            "message": (
+                "Minimum payment is KSh 1."
+            ),
+        }), 400
+
+    if amount > Decimal("150000"):
+        return jsonify({
+            "success": False,
+            "message": (
+                "Maximum payment is KSh 150,000."
+            ),
+        }), 400
+
+    if not validate_payment_purpose(
+        purpose
+    ):
+        return jsonify({
+            "success": False,
+            "message": (
+                "Invalid payment purpose."
+            ),
+        }), 400
+
+    # New IntaSend payment sessions are wallet top-ups.
+    # Subscription purchases remain disabled in the new
+    # payment flow.
+    if purpose == "subscribe":
+        return jsonify({
+            "success": False,
+            "message": (
+                "Subscription payments are not available "
+                "through the new wallet payment flow."
+            ),
+        }), 400
+
+    conn = database.get_connection()
 
     try:
-        student = get_student_by_code(
-            conn,
-            soma_hub_code,
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT
+                id,
+                soma_hub_code,
+                name
+            FROM students
+            WHERE soma_hub_code = %s
+            LIMIT 1
+            """,
+            (
+                soma_hub_code,
+            ),
         )
 
+        student = cur.fetchone()
+
         if not student:
+            conn.rollback()
+
             return jsonify({
                 "success": False,
-                "error": "Student not found.",
-                "field": "somaHubCode",
+                "message": (
+                    "Student not found."
+                ),
             }), 404
 
-        session_id = secrets.token_urlsafe(24)
+        session_id = secrets.token_urlsafe(
+            24
+        )
 
-        api_ref = f"SOMA-{session_id}"
+        api_ref = (
+            "SOMA-"
+            + session_id
+        )
 
         expires_at = (
             utc_now()
             + timedelta(minutes=30)
         )
 
-        row = conn.execute(
+        cur.execute(
             """
             INSERT INTO payment_sessions (
                 session_id,
                 student_id,
                 soma_hub_code,
                 amount,
+                phone,
+                purpose,
                 status,
-                phone_number,
-                created_at,
+                merchant_request_id,
                 expires_at,
-                purpose
+                created_at
             )
             VALUES (
+                %s,
+                %s,
                 %s,
                 %s,
                 %s,
@@ -1828,10 +2575,8 @@ def create_payment_session():
                 'PENDING',
                 %s,
                 %s,
-                %s,
                 %s
             )
-            RETURNING id
             """,
             (
                 session_id,
@@ -1839,13 +2584,12 @@ def create_payment_session():
                 soma_hub_code,
                 amount,
                 phone,
-                now_string(),
-                expires_at.isoformat(),
                 purpose,
+                api_ref,
+                expires_at,
+                now_string(),
             ),
-        ).fetchone()
-
-        payment_session_id = row["id"]
+        )
 
         conn.commit()
 
@@ -1856,27 +2600,30 @@ def create_payment_session():
     finally:
         conn.close()
 
-    # --------------------------------------------------------
-    # INITIATE INTASEND M-PESA STK PUSH
-    # --------------------------------------------------------
-
     try:
         service = get_intasend_service()
 
         response = service.collect.mpesa_stk_push(
             phone_number=phone,
             amount=float(amount),
-            narrative=f"SOMA HUB {purpose}",
+            narrative=(
+                "SOMA HUB "
+                + purpose
+            ),
             currency="KES",
             api_ref=api_ref,
         )
 
-        invoice_id = extract_intasend_invoice_id(
-            response
+        invoice_id = (
+            extract_intasend_invoice_id(
+                response
+            )
         )
 
-        returned_api_ref = extract_intasend_api_ref(
-            response
+        returned_api_ref = (
+            extract_intasend_api_ref(
+                response
+            )
         )
 
         if not invoice_id:
@@ -1886,873 +2633,84 @@ def create_payment_session():
 
         if (
             returned_api_ref
-            and str(returned_api_ref).strip()
-            != api_ref
+            and returned_api_ref != api_ref
         ):
             raise RuntimeError(
-                "IntaSend returned an unexpected "
-                "payment reference."
+                "IntaSend returned an unexpected API reference."
             )
 
-        conn = get_db()
+        conn = database.get_connection()
 
         try:
-            conn.execute(
+            cur = conn.cursor()
+
+            cur.execute(
                 """
                 UPDATE payment_sessions
                 SET
                     checkout_request_id = %s,
                     merchant_request_id = %s
-                WHERE id = %s
+                WHERE session_id = %s
                 """,
                 (
                     invoice_id,
                     api_ref,
-                    payment_session_id,
+                    session_id,
                 ),
             )
 
             conn.commit()
+
+        except Exception:
+            conn.rollback()
+            raise
 
         finally:
             conn.close()
 
         return jsonify({
             "success": True,
-
-            # Frontend payments.ts expects this:
             "session_id": session_id,
-
-            # Existing compatibility fields:
-            "sessionId": session_id,
-            "payment_session_id": payment_session_id,
-            "paymentSessionId": payment_session_id,
             "invoice_id": invoice_id,
-            "invoiceId": invoice_id,
-
+            "checkout_request_id": invoice_id,
+            "merchant_request_id": api_ref,
             "amount": float(amount),
             "phone": phone,
             "purpose": purpose,
-
-            "payment_url": None,
-
-            "status": "pending",
+            "status": "PENDING",
         })
 
     except Exception as exc:
-        conn = get_db()
+        conn = database.get_connection()
 
         try:
-            conn.execute(
+            cur = conn.cursor()
+
+            cur.execute(
                 """
                 UPDATE payment_sessions
                 SET status = 'FAILED'
-                WHERE id = %s
+                WHERE session_id = %s
                 """,
-                (payment_session_id,),
+                (
+                    session_id,
+                ),
             )
 
             conn.commit()
 
+        except Exception:
+            conn.rollback()
+
         finally:
             conn.close()
 
-        app.logger.exception(
-            "IntaSend payment initiation failed."
-        )
-
         return jsonify({
             "success": False,
+            "message": (
+                "Could not start the M-Pesa payment."
+            ),
             "error": str(exc),
         }), 502
 
-
-# ============================================================
-# INTASEND WEBHOOK
-# ============================================================
-
-@app.post("/api/intasend/webhook")
-def intasend_webhook():
-    payload = request.get_json(
-        silent=True
-    ) or {}
-
-    supplied_challenge = str(
-        payload.get("challenge")
-        or request.args.get("challenge")
-        or ""
-    ).strip()
-
-    expected_challenge = (
-        INTASEND_WEBHOOK_CHALLENGE
-    )
-
-    if not expected_challenge:
-        app.logger.error(
-            "INTASEND_WEBHOOK_CHALLENGE "
-            "is not configured."
-        )
-
-        return jsonify({
-            "success": False,
-            "error": "Webhook is not configured.",
-        }), 503
-
-    if not supplied_challenge:
-        return jsonify({
-            "success": False,
-            "error": "Webhook challenge missing.",
-        }), 403
-
-    if not hmac.compare_digest(
-        supplied_challenge,
-        expected_challenge,
-    ):
-        app.logger.warning(
-            "Rejected IntaSend webhook with "
-            "invalid challenge."
-        )
-
-        return jsonify({
-            "success": False,
-            "error": "Invalid webhook challenge.",
-        }), 403
-
-    invoice_id = str(
-        payload.get("invoice_id")
-        or ""
-    ).strip()
-
-    api_ref = str(
-        payload.get("api_ref")
-        or payload.get("api_reference")
-        or ""
-    ).strip()
-
-    state = str(
-        payload.get("state")
-        or ""
-    ).strip().upper()
-
-    if not invoice_id and not api_ref:
-        return jsonify({
-            "success": False,
-            "error": "Missing payment reference.",
-        }), 400
-
-    conn = get_db()
-
-    try:
-        payment_session = None
-
-        # ----------------------------------------------------
-        # Find payment using both identifiers when available.
-        # ----------------------------------------------------
-
-        if invoice_id and api_ref:
-            payment_session = conn.execute(
-                """
-                SELECT *
-                FROM payment_sessions
-                WHERE checkout_request_id = %s
-                  AND merchant_request_id = %s
-                LIMIT 1
-                """,
-                (
-                    invoice_id,
-                    api_ref,
-                ),
-            ).fetchone()
-
-            if not payment_session:
-                invoice_match = conn.execute(
-                    """
-                    SELECT *
-                    FROM payment_sessions
-                    WHERE checkout_request_id = %s
-                    LIMIT 1
-                    """,
-                    (invoice_id,),
-                ).fetchone()
-
-                if invoice_match:
-                    conn.rollback()
-
-                    app.logger.warning(
-                        "Rejected webhook: api_ref mismatch "
-                        "for invoice %s",
-                        invoice_id,
-                    )
-
-                    return jsonify({
-                        "success": False,
-                        "error": (
-                            "Payment reference mismatch."
-                        ),
-                    }), 403
-
-        elif invoice_id:
-            payment_session = conn.execute(
-                """
-                SELECT *
-                FROM payment_sessions
-                WHERE checkout_request_id = %s
-                LIMIT 1
-                """,
-                (invoice_id,),
-            ).fetchone()
-
-        elif api_ref:
-            payment_session = conn.execute(
-                """
-                SELECT *
-                FROM payment_sessions
-                WHERE merchant_request_id = %s
-                LIMIT 1
-                """,
-                (api_ref,),
-            ).fetchone()
-
-        # ----------------------------------------------------
-        # Unknown payment.
-        # ----------------------------------------------------
-
-        if not payment_session:
-            conn.rollback()
-
-            app.logger.warning(
-                "Received IntaSend webhook for "
-                "unknown payment. invoice_id=%s "
-                "api_ref=%s state=%s",
-                invoice_id,
-                api_ref,
-                state,
-            )
-
-            return jsonify({
-                "success": True,
-                "processed": False,
-                "message": (
-                    "Payment session not found."
-                ),
-            })
-
-        payment_session = dict(
-            payment_session
-        )
-
-        stored_invoice = str(
-            payment_session.get(
-                "checkout_request_id"
-            )
-            or ""
-        ).strip()
-
-        stored_api_ref = str(
-            payment_session.get(
-                "merchant_request_id"
-            )
-            or ""
-        ).strip()
-
-        # ----------------------------------------------------
-        # Verify invoice ownership.
-        # ----------------------------------------------------
-
-        if (
-            invoice_id
-            and stored_invoice
-            and invoice_id != stored_invoice
-        ):
-            conn.rollback()
-
-            return jsonify({
-                "success": False,
-                "error": (
-                    "Invoice ownership mismatch."
-                ),
-            }), 403
-
-        # ----------------------------------------------------
-        # Verify API reference ownership.
-        # ----------------------------------------------------
-
-        if (
-            api_ref
-            and stored_api_ref
-            and api_ref != stored_api_ref
-        ):
-            conn.rollback()
-
-            return jsonify({
-                "success": False,
-                "error": (
-                    "API reference ownership mismatch."
-                ),
-            }), 403
-
-        # ----------------------------------------------------
-        # Verify amount.
-        # ----------------------------------------------------
-
-        webhook_amount = (
-            payload.get("value")
-            if payload.get("value") is not None
-            else payload.get("amount")
-        )
-
-        if webhook_amount is not None:
-            if not amounts_match(
-                webhook_amount,
-                payment_session.get("amount"),
-            ):
-                conn.rollback()
-
-                app.logger.warning(
-                    "Rejected webhook: amount mismatch "
-                    "for payment session %s",
-                    payment_session["id"],
-                )
-
-                return jsonify({
-                    "success": False,
-                    "error": (
-                        "Payment amount mismatch."
-                    ),
-                }), 403
-
-        conn.rollback()
-
-    finally:
-        conn.close()
-
-    # --------------------------------------------------------
-    # COMPLETE PAYMENT
-    # --------------------------------------------------------
-
-    if state == "COMPLETE":
-        result = process_completed_payment(
-            payment_session["id"],
-            invoice_id=(
-                invoice_id
-                or payment_session.get(
-                    "checkout_request_id"
-                )
-            ),
-        )
-
-        if not result.get("success"):
-            return jsonify(result), 500
-
-        try:
-            # IMPORTANT:
-            # coins.py expects the TEXT session_id,
-            # not the numeric payment_sessions.id.
-            fulfil_result = (
-                coins_bp.fulfil_payment_purpose(
-                    payment_session["session_id"]
-                )
-            )
-
-        except Exception:
-            app.logger.exception(
-                "Wallet credit succeeded but "
-                "payment purpose fulfilment failed "
-                "for session %s",
-                payment_session["session_id"],
-            )
-
-            return jsonify({
-                "success": False,
-                "paymentCredited": True,
-                "fulfilment": False,
-                "error": (
-                    "Payment credited but fulfilment "
-                    "failed."
-                ),
-            }), 500
-
-        return jsonify({
-            "success": True,
-            "processed": True,
-            "alreadyProcessed": result.get(
-                "already_processed",
-                False,
-            ),
-            "payment_session_id": payment_session["id"],
-            "paymentSessionId": payment_session["id"],
-            "session_id": payment_session["session_id"],
-            "sessionId": payment_session["session_id"],
-            "wallet_balance": result.get("balance"),
-            "balance": result.get("balance"),
-            "fulfilment": fulfil_result,
-            "state": "COMPLETE",
-        })
-
-    # --------------------------------------------------------
-    # FAILED PAYMENT
-    # --------------------------------------------------------
-
-    if state == "FAILED":
-        conn = get_db()
-
-        try:
-            conn.execute(
-                """
-                UPDATE payment_sessions
-                SET status = 'FAILED'
-                WHERE id = %s
-                  AND status <> 'COMPLETED'
-                """,
-                (payment_session["id"],),
-            )
-
-            conn.commit()
-
-        finally:
-            conn.close()
-
-        return jsonify({
-            "success": True,
-            "processed": True,
-            "state": "FAILED",
-        })
-
-    # --------------------------------------------------------
-    # PENDING / OTHER STATE
-    # --------------------------------------------------------
-
-    return jsonify({
-        "success": True,
-        "processed": False,
-        "state": state or "PENDING",
-    })
-
-
-# ============================================================
-# PAYMENT STATUS
-# ============================================================
-
-@app.get(
-    "/api/intasend/payment-status/<session_id>"
-)
-def payment_status(session_id):
-    session_id = str(
-        session_id
-    ).strip()
-
-    conn = get_db()
-
-    try:
-        payment_session = conn.execute(
-            """
-            SELECT *
-            FROM payment_sessions
-            WHERE session_id = %s
-            LIMIT 1
-            """,
-            (session_id,),
-        ).fetchone()
-
-    finally:
-        conn.close()
-
-    if not payment_session:
-        return jsonify({
-            "success": False,
-            "error": "Payment session not found.",
-        }), 404
-
-    payment_session = dict(
-        payment_session
-    )
-
-    # --------------------------------------------------------
-    # Expiry check.
-    # --------------------------------------------------------
-
-    if (
-        str(
-            payment_session.get("status") or ""
-        ).upper()
-        == "PENDING"
-    ):
-        expires_at = parse_database_datetime(
-            payment_session.get("expires_at")
-        )
-
-        if (
-            expires_at
-            and utc_now() > expires_at
-        ):
-            conn = get_db()
-
-            try:
-                conn.execute(
-                    """
-                    UPDATE payment_sessions
-                    SET status = 'EXPIRED'
-                    WHERE id = %s
-                      AND status = 'PENDING'
-                    """,
-                    (payment_session["id"],),
-                )
-
-                conn.commit()
-
-            finally:
-                conn.close()
-
-            payment_session["status"] = "EXPIRED"
-
-    local_status = str(
-        payment_session.get("status") or ""
-    ).upper()
-
-    # --------------------------------------------------------
-    # Local failed/expired status.
-    # --------------------------------------------------------
-
-    if local_status in {
-        "FAILED",
-        "EXPIRED",
-    }:
-        balance = calculate_wallet_balance(
-            payment_session["soma_hub_code"]
-        )
-
-        frontend_status = (
-            "failed"
-            if local_status == "FAILED"
-            else "expired"
-        )
-
-        return jsonify({
-            "success": True,
-
-            "session_id": session_id,
-            "status": frontend_status,
-            "wallet_balance": balance,
-            "purpose_result": None,
-
-            "sessionId": session_id,
-            "balance": balance,
-        })
-
-    # --------------------------------------------------------
-    # Already completed locally.
-    # --------------------------------------------------------
-
-    if local_status == "COMPLETED":
-        balance = calculate_wallet_balance(
-            payment_session["soma_hub_code"]
-        )
-
-        return jsonify({
-            "success": True,
-
-            "session_id": session_id,
-            "status": "completed",
-            "wallet_balance": balance,
-            "purpose_result": None,
-
-            "sessionId": session_id,
-            "balance": balance,
-        })
-
-    # --------------------------------------------------------
-    # Ask IntaSend for current status.
-    # --------------------------------------------------------
-
-    try:
-        result = sync_payment_from_intasend(
-            payment_session
-        )
-
-    except Exception:
-        app.logger.exception(
-            "Failed to check IntaSend payment status."
-        )
-
-        return jsonify({
-            "success": False,
-            "error": (
-                "Unable to check payment status."
-            ),
-        }), 502
-
-    if not result.get("success"):
-        return jsonify(result), 502
-
-    # --------------------------------------------------------
-    # IntaSend says payment is complete.
-    # --------------------------------------------------------
-
-    if result.get("state") == "COMPLETE":
-        conn = get_db()
-
-        try:
-            latest_session = conn.execute(
-                """
-                SELECT *
-                FROM payment_sessions
-                WHERE id = %s
-                LIMIT 1
-                """,
-                (payment_session["id"],),
-            ).fetchone()
-
-        finally:
-            conn.close()
-
-        latest_session = dict(
-            latest_session
-            or payment_session
-        )
-
-        try:
-            # IMPORTANT:
-            # coins.py expects the TEXT session_id,
-            # not the numeric payment_sessions.id.
-            fulfil_result = (
-                coins_bp.fulfil_payment_purpose(
-                    latest_session["session_id"]
-                )
-            )
-
-        except Exception:
-            app.logger.exception(
-                "Payment completed but fulfilment "
-                "failed for session %s",
-                latest_session["session_id"],
-            )
-
-            return jsonify({
-                "success": False,
-                "paymentCredited": True,
-                "error": (
-                    "Payment credited but fulfilment "
-                    "failed."
-                ),
-            }), 500
-
-        balance = calculate_wallet_balance(
-            latest_session["soma_hub_code"]
-        )
-
-        return jsonify({
-            "success": True,
-
-            "session_id": session_id,
-            "status": "completed",
-            "wallet_balance": balance,
-
-            "purpose_result": fulfil_result,
-
-            "sessionId": session_id,
-            "balance": balance,
-            "fulfilment": fulfil_result,
-        })
-
-    # --------------------------------------------------------
-    # Payment failed according to IntaSend.
-    # --------------------------------------------------------
-
-    if str(
-        result.get("state") or ""
-    ).upper() == "FAILED":
-        balance = calculate_wallet_balance(
-            payment_session["soma_hub_code"]
-        )
-
-        return jsonify({
-            "success": True,
-
-            "session_id": session_id,
-            "status": "failed",
-            "wallet_balance": balance,
-            "purpose_result": None,
-
-            "sessionId": session_id,
-            "balance": balance,
-        })
-
-    # --------------------------------------------------------
-    # Still pending / processing.
-    # --------------------------------------------------------
-
-    balance = calculate_wallet_balance(
-        payment_session["soma_hub_code"]
-    )
-
-    return jsonify({
-        "success": True,
-
-        "session_id": session_id,
-        "status": "pending",
-        "wallet_balance": balance,
-        "purpose_result": None,
-
-        "sessionId": session_id,
-        "balance": balance,
-    })
-
-
-# ============================================================
-# WALLET BALANCE
-# ============================================================
-
-@app.get(
-    "/api/wallet/<soma_hub_code>"
-)
-def wallet_balance(soma_hub_code):
-    soma_hub_code = str(
-        soma_hub_code
-    ).strip()
-
-    balance = calculate_wallet_balance(
-        soma_hub_code
-    )
-
-    return jsonify({
-        "success": True,
-        "balance": balance,
-        "coins": balance,
-        "ksh": balance,
-    })
-
-
-# ============================================================
-# DEV TEST PAYMENT
-# ============================================================
-
-@app.post(
-    "/api/dev/test-payment/<session_id>"
-)
-def dev_test_payment(session_id):
-    if not is_sandbox():
-        return jsonify({
-            "success": False,
-            "error": (
-                "Test payment endpoint is "
-                "disabled in live mode."
-            ),
-        }), 403
-
-    session_id = str(
-        session_id
-    ).strip()
-
-    conn = get_db()
-
-    try:
-        payment_session = conn.execute(
-            """
-            SELECT *
-            FROM payment_sessions
-            WHERE session_id = %s
-            LIMIT 1
-            """,
-            (session_id,),
-        ).fetchone()
-
-    finally:
-        conn.close()
-
-    if not payment_session:
-        return jsonify({
-            "success": False,
-            "error": "Payment session not found.",
-        }), 404
-
-    payment_session = dict(payment_session)
-
-    result = process_completed_payment(
-        payment_session["id"],
-        invoice_id=payment_session.get(
-            "checkout_request_id"
-        ),
-    )
-
-    if not result.get("success"):
-        return jsonify(result), 500
-
-    try:
-        # IMPORTANT:
-        # coins.py expects the TEXT session_id,
-        # not the numeric payment_sessions.id.
-        fulfil_result = (
-            coins_bp.fulfil_payment_purpose(
-                payment_session["session_id"]
-            )
-        )
-
-    except Exception:
-        app.logger.exception(
-            "Test payment credited but "
-            "fulfilment failed."
-        )
-
-        return jsonify({
-            "success": False,
-            "paymentCredited": True,
-            "error": (
-                "Payment credited but fulfilment "
-                "failed."
-            ),
-        }), 500
-
-    return jsonify({
-        "success": True,
-        "payment": result,
-        "fulfilment": fulfil_result,
-    })
-
-
-# ============================================================
-# COINS / MATERIALS BLUEPRINT
-# ============================================================
-
-coins_bp = create_coins_blueprint(
-    get_db,
-    now_string,
-    calculate_wallet_balance,
-    is_sandbox,
-)
-
-# coins.py already defines routes with /api/...
-# Therefore there must NOT be another /api prefix here.
-
-app.register_blueprint(
-    coins_bp
-)
-
-
-# ============================================================
-# DATABASE INITIALIZATION
-# ============================================================
-
-try:
-    database.init_db()
-except Exception:
-    app.logger.exception(
-        "Database initialization failed."
-    )
-
-
-# ============================================================
-# RUN SERVER
-# ============================================================
-
-if __name__ == "__main__":
-    port = int(
-        os.getenv(
-            "PORT",
-            "5000",
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-    )
+    

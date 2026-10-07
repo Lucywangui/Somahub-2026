@@ -1,9 +1,9 @@
 import {
   ApiError,
   apiRequest,
-  newRequestId,
   postJson,
 } from "@/lib/api";
+
 import {
   syncStudentToBackend,
   useSomaStore,
@@ -11,9 +11,16 @@ import {
 } from "@/lib/storage";
 
 /* =========================================================
-   SERVER ACCOUNT: COINS, KSH AND UNLOCKS
-   The server owns both balances. Every successful response
-   carries the updated account, which replaces the store's copy.
+   SERVER ACCOUNT: PAID WALLET, KSH AND UNLOCKS
+
+   The server is the source of truth for:
+   - SOMA Points / paid wallet balance
+   - KSh wallet balance
+   - material unlocks
+   - subscription information
+
+   Local purchased/unlocked data is NEVER uploaded to the
+   server as a free import.
    ========================================================= */
 
 interface AccountResponse {
@@ -100,16 +107,22 @@ async function withRegistration<T>(
 }
 
 /* ---------------------------------------------------------
-   Sync
+   Account Sync
    --------------------------------------------------------- */
 
 let syncInFlight: Promise<void> | null = null;
 
 /**
- * Loads the server account into the store. The first time a
- * device syncs, its local coins and unlocks are moved to the
- * server (the server caps the coins and only does this once).
- * Also sends any quiz rewards earned while offline.
+ * Loads the paid server account into the local store.
+ *
+ * IMPORTANT:
+ * The server is the source of truth.
+ *
+ * Local wallet balances and local material unlocks are NOT
+ * imported into the server.
+ *
+ * This prevents old/local state from creating free SOMA
+ * Points or free material unlocks.
  */
 export function syncAccount(): Promise<void> {
   if (!syncInFlight) {
@@ -121,38 +134,20 @@ export function syncAccount(): Promise<void> {
   return syncInFlight;
 }
 
-async function runSync() {
+async function runSync(): Promise<void> {
   const code = student().soma_hub_code;
 
-  let account = await withRegistration(() =>
+  const account = await withRegistration(() =>
     apiRequest<AccountResponse>(
       `/api/account/${encodeURIComponent(code)}`
     )
   );
 
-  if (!account.imported) {
-    const state = useSomaStore.getState();
-
-    account = await postJson<AccountResponse>(
-      "/api/account/import",
-      {
-        soma_hub_code: code,
-        coins: state.wallet,
-        unlocked: [
-          ...state.purchased,
-          ...state.libraryHidden,
-        ],
-      }
-    );
-  }
-
   apply(account);
-
-  await flushRewards();
 }
 
 /* ---------------------------------------------------------
-   Unlocking
+   Material Unlocking
    --------------------------------------------------------- */
 
 export type UnlockResult =
@@ -172,11 +167,19 @@ export type UnlockResult =
       kshNeeded: number;
       canPayWithKsh: boolean;
     }
-  | { status: "error"; message: string };
+  | {
+      status: "error";
+      message: string;
+    };
 
 /**
- * Unlocks a material. Without allowKsh, a coin shortfall comes
- * back as "short" so the app can ask before spending KSh.
+ * Unlocks a material through the server.
+ *
+ * The server verifies the paid wallet balance and performs
+ * the actual debit/unlock atomically.
+ *
+ * Without allowKsh, a payment shortfall is returned as
+ * "short" so the UI can ask before using the paid wallet.
  */
 export async function unlockMaterial(
   materialId: string,
@@ -199,7 +202,10 @@ export async function unlockMaterial(
     );
 
     apply(response);
-    useSomaStore.getState().showInLibrary(materialId);
+
+    useSomaStore
+      .getState()
+      .showInLibrary(materialId);
 
     return {
       status: "unlocked",
@@ -213,7 +219,10 @@ export async function unlockMaterial(
       error instanceof ApiError &&
       error.httpStatus === 402
     ) {
-      const body = error.body as Record<string, number | boolean>;
+      const body = error.body as Record<
+        string,
+        number | boolean
+      >;
 
       return {
         status: "short",
@@ -222,7 +231,8 @@ export async function unlockMaterial(
         price: Number(body.price),
         shortfallCoins: Number(body.shortfall_coins),
         kshNeeded: Number(body.ksh_needed),
-        canPayWithKsh: body.can_pay_with_ksh === true,
+        canPayWithKsh:
+          body.can_pay_with_ksh === true,
       };
     }
 
@@ -233,184 +243,5 @@ export async function unlockMaterial(
           ? error.message
           : "Couldn't unlock this material.",
     };
-  }
-}
-
-/* ---------------------------------------------------------
-   Buying coins
-   --------------------------------------------------------- */
-
-export async function buyCoins(
-  coins: number,
-  requestId = newRequestId()
-): Promise<void> {
-  const response = await withRegistration(() =>
-    postJson<AccountResponse>("/api/coins/buy", {
-      soma_hub_code: student().soma_hub_code,
-      coins,
-      request_id: requestId,
-    })
-  );
-
-  apply(response);
-}
-
-/* ---------------------------------------------------------
-   Subscriptions
-   --------------------------------------------------------- */
-
-export type SubscribeResult =
-  | { status: "subscribed" }
-  | { status: "short"; ksh: number; kshNeeded: number }
-  | { status: "error"; message: string };
-
-/** Pays for the grade subscription from the KSh wallet. */
-export async function subscribeFromWallet(
-  requestId = newRequestId()
-): Promise<SubscribeResult> {
-  try {
-    const response = await withRegistration(() =>
-      postJson<AccountResponse>("/api/subscriptions", {
-        soma_hub_code: student().soma_hub_code,
-        request_id: requestId,
-      })
-    );
-
-    apply(response);
-    return { status: "subscribed" };
-  } catch (error) {
-    if (
-      error instanceof ApiError &&
-      error.httpStatus === 402
-    ) {
-      return {
-        status: "short",
-        ksh: Number(error.body.ksh),
-        kshNeeded: Number(error.body.ksh_needed),
-      };
-    }
-
-    return {
-      status: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "Couldn't start the subscription.",
-    };
-  }
-}
-
-/** Sandbox only: adds 100 coins for testing. */
-export async function grantDevCoins(): Promise<void> {
-  apply(
-    await postJson<AccountResponse>(
-      "/api/dev/grant-coins",
-      { soma_hub_code: student().soma_hub_code }
-    )
-  );
-}
-
-/* ---------------------------------------------------------
-   Quiz rewards (offline-safe)
-   --------------------------------------------------------- */
-
-export interface RewardClaim {
-  attemptId: string;
-  materialId: string;
-  type: "topical" | "exam";
-  percentage: number;
-}
-
-const OUTBOX_KEY = "soma_reward_outbox";
-
-export function loadOutbox(): RewardClaim[] {
-  try {
-    const raw = localStorage.getItem(OUTBOX_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveOutbox(claims: RewardClaim[]) {
-  try {
-    localStorage.setItem(OUTBOX_KEY, JSON.stringify(claims));
-  } catch {
-    // Storage unavailable (private mode): offline claims are lost.
-  }
-}
-
-/**
- * Records a finished quiz and sends it to the server. The claim
- * waits in a local outbox until the server accepts it, so quizzes
- * done offline are paid later. The attempt ID makes resending safe.
- */
-export function claimReward(
-  claim: Omit<RewardClaim, "attemptId">
-): Promise<void> {
-  saveOutbox([
-    ...loadOutbox(),
-    { ...claim, attemptId: newRequestId() },
-  ]);
-
-  return flushRewards();
-}
-
-let flushInFlight: Promise<void> | null = null;
-
-export function flushRewards(): Promise<void> {
-  if (!flushInFlight) {
-    flushInFlight = runFlush().finally(() => {
-      flushInFlight = null;
-    });
-  }
-
-  return flushInFlight;
-}
-
-async function runFlush() {
-  // Re-read the outbox each time so claims added while this runs
-  // are sent too. `done` guards against a loop if saving fails.
-  const done = new Set<string>();
-
-  for (;;) {
-    const claim = loadOutbox().find(
-      (queued) => !done.has(queued.attemptId)
-    );
-
-    if (!claim) return;
-
-    try {
-      const response = await withRegistration(() =>
-        postJson<AccountResponse>("/api/coins/reward", {
-          soma_hub_code: student().soma_hub_code,
-          attempt_id: claim.attemptId,
-          material_id: claim.materialId,
-          type: claim.type,
-          percentage: claim.percentage,
-        })
-      );
-
-      apply(response);
-    } catch (error) {
-      const retryLater =
-        !(error instanceof ApiError) ||
-        error.isNetworkError ||
-        error.httpStatus === 404 ||
-        (error.httpStatus ?? 0) >= 500;
-
-      // Offline or server trouble: keep this and later claims.
-      if (retryLater) return;
-
-      // The server rejected the claim itself; drop it.
-    }
-
-    done.add(claim.attemptId);
-
-    saveOutbox(
-      loadOutbox().filter(
-        (queued) => queued.attemptId !== claim.attemptId
-      )
-    );
   }
 }

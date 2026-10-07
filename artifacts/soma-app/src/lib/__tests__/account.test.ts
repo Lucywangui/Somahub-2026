@@ -1,8 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 const applyAccount = vi.fn();
 const showInLibrary = vi.fn();
 const syncStudentToBackend = vi.fn();
+
 const state = {
   somaHubCode: "SH-ABC123",
   name: "Wanjiku",
@@ -17,15 +24,17 @@ const state = {
 
 vi.mock("@/lib/storage", () => ({
   SOMA_API_BASE_URL: "http://api.test",
-  syncStudentToBackend: (...args: unknown[]) => syncStudentToBackend(...args),
-  useSomaStore: { getState: () => state },
+
+  syncStudentToBackend: (
+    ...args: unknown[]
+  ) => syncStudentToBackend(...args),
+
+  useSomaStore: {
+    getState: () => state,
+  },
 }));
 
 import {
-  claimReward,
-  flushRewards,
-  loadOutbox,
-  subscribeFromWallet,
   syncAccount,
   toServerAccount,
   unlockMaterial,
@@ -33,153 +42,436 @@ import {
 
 const ACCOUNT = {
   success: true,
+
+  // Server wallet balance.
+  // This is the paid SOMA Points balance.
   coins: 10,
-  ksh: 50,
+  ksh: 10,
+
   unlocked: ["m1"],
+
   earned_today: 0,
+
   imported: true,
-  prices: { material_coins: 5, ksh_per_coin: 1, daily_cap: 200 },
+
+  prices: {
+    material_coins: 5,
+    ksh_per_coin: 1,
+    daily_cap: 0,
+    subscription_ksh: 100,
+    subscription_days: 30,
+  },
+
+  subscription: null,
 };
 
-function jsonResponse(status: number, body: unknown) {
-  return new Response(JSON.stringify(body), { status });
+function jsonResponse(
+  status: number,
+  body: unknown
+) {
+  return new Response(
+    JSON.stringify(body),
+    {
+      status,
+      headers: {
+        "Content-Type":
+          "application/json",
+      },
+    }
+  );
 }
 
-function memoryStorage() {
-  const data = new Map<string, string>();
-  return {
-    getItem: (k: string) => data.get(k) ?? null,
-    setItem: (k: string, v: string) => void data.set(k, v),
-    removeItem: (k: string) => void data.delete(k),
-  };
-}
-
-function sentBodies(fetchMock: ReturnType<typeof vi.fn>) {
-  return fetchMock.mock.calls.map(([url, init]) => ({
-    url: String(url).replace("http://api.test", ""),
-    body: init?.body ? JSON.parse(init.body as string) : undefined,
-  }));
+function sentBodies(
+  fetchMock: ReturnType<typeof vi.fn>
+) {
+  return fetchMock.mock.calls.map(
+    ([url, init]) => ({
+      url: String(url).replace(
+        "http://api.test",
+        ""
+      ),
+      body: init?.body
+        ? JSON.parse(
+            init.body as string
+          )
+        : undefined,
+    })
+  );
 }
 
 beforeEach(() => {
   vi.unstubAllGlobals();
-  vi.stubGlobal("localStorage", memoryStorage());
+
   applyAccount.mockReset();
+  showInLibrary.mockReset();
   syncStudentToBackend.mockReset();
 });
 
-describe("claimReward", () => {
-  it("sends the claim and clears it from the outbox", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse(200, ACCOUNT));
-    vi.stubGlobal("fetch", fetchMock);
 
-    await claimReward({ materialId: "m1", type: "exam", percentage: 90 });
+// ============================================================
+// syncAccount
+// ============================================================
 
-    const [call] = sentBodies(fetchMock);
-    expect(call.url).toBe("/api/coins/reward");
-    expect(call.body).toMatchObject({
-      soma_hub_code: "SH-ABC123",
-      material_id: "m1",
-      type: "exam",
-      percentage: 90,
-    });
-    expect(call.body.attempt_id).toEqual(expect.any(String));
-    expect(loadOutbox()).toEqual([]);
-    expect(applyAccount).toHaveBeenCalledWith(expect.objectContaining({ coins: 10, ksh: 50 }));
-  });
-
-  it("keeps claims while offline and resends them in order with the same IDs", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
-
-    await claimReward({ materialId: "a", type: "topical", percentage: 50 });
-    await claimReward({ materialId: "b", type: "topical", percentage: 60 });
-
-    const queued = loadOutbox();
-    expect(queued.map((c) => c.materialId)).toEqual(["a", "b"]);
-
-    const fetchMock = vi.fn(async () => jsonResponse(200, ACCOUNT));
-    vi.stubGlobal("fetch", fetchMock);
-    await flushRewards();
-
-    expect(sentBodies(fetchMock).map((c) => c.body.attempt_id)).toEqual(
-      queued.map((c) => c.attemptId),
+describe("syncAccount", () => {
+  it("loads the account directly from the server", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          ACCOUNT
+        )
     );
-    expect(loadOutbox()).toEqual([]);
+
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
+
+    await syncAccount();
+
+    expect(
+      sentBodies(fetchMock)
+    ).toEqual([
+      {
+        url:
+          "/api/account/SH-ABC123",
+        body: undefined,
+      },
+    ]);
+
+    expect(
+      applyAccount
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        coins: 10,
+        ksh: 10,
+        unlocked: ["m1"],
+      })
+    );
   });
 
-  it("keeps the claim when the server errors", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(500, { success: false })));
+  it("does not import local wallet balance or local unlocks", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            coins: 0,
+            ksh: 0,
+            unlocked: [],
+            imported: false,
+          }
+        )
+    );
 
-    await claimReward({ materialId: "a", type: "topical", percentage: 50 });
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
 
-    expect(loadOutbox()).toHaveLength(1);
+    await syncAccount();
+
+    const calls =
+      sentBodies(fetchMock);
+
+    expect(calls).toHaveLength(1);
+
+    expect(calls[0].url).toBe(
+      "/api/account/SH-ABC123"
+    );
+
+    expect(
+      calls.some(
+        (call) =>
+          call.url ===
+          "/api/account/import"
+      )
+    ).toBe(false);
+
+    expect(
+      syncStudentToBackend
+    ).not.toHaveBeenCalled();
   });
 
-  it("drops a claim the server rejects and carries on", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse(400, { success: false, message: "bad" }))
-      .mockResolvedValueOnce(jsonResponse(200, ACCOUNT));
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
-    await claimReward({ materialId: "bad", type: "topical", percentage: 50 });
-    await claimReward({ materialId: "good", type: "topical", percentage: 50 });
+  it("uses the server balance even when local state has a different balance", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            coins: 25,
+            ksh: 25,
+          }
+        )
+    );
 
-    vi.stubGlobal("fetch", fetchMock);
-    await flushRewards();
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(loadOutbox()).toEqual([]);
+    await syncAccount();
+
+    expect(
+      applyAccount
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        coins: 25,
+        ksh: 25,
+      })
+    );
   });
 
-  it("registers an unknown student, then sends the claim", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse(404, { success: false, message: "Student not found" }))
-      .mockResolvedValueOnce(jsonResponse(200, ACCOUNT));
-    vi.stubGlobal("fetch", fetchMock);
+  it("does not create free SOMA Points when the server balance is zero", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            coins: 0,
+            ksh: 0,
+            unlocked: [],
+          }
+        )
+    );
 
-    await claimReward({ materialId: "a", type: "topical", percentage: 50 });
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
 
-    expect(syncStudentToBackend).toHaveBeenCalledOnce();
-    expect(loadOutbox()).toEqual([]);
+    await syncAccount();
+
+    expect(
+      applyAccount
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        coins: 0,
+        ksh: 0,
+        unlocked: [],
+      })
+    );
   });
 });
 
-describe("unlockMaterial", () => {
-  it("returns unlocked and applies the account", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse(200, { ...ACCOUNT, coins_spent: 5, ksh_spent: 0, already_unlocked: false })),
-    );
 
-    const result = await unlockMaterial("m9");
+// ============================================================
+// toServerAccount
+// ============================================================
 
-    expect(result).toEqual({ status: "unlocked", coinsSpent: 5, kshSpent: 0, alreadyUnlocked: false });
-    expect(applyAccount).toHaveBeenCalled();
-    expect(showInLibrary).toHaveBeenCalledWith("m9");
+describe("toServerAccount", () => {
+  it("maps the paid wallet balance correctly", () => {
+    const account =
+      toServerAccount(
+        ACCOUNT
+      );
+
+    expect(
+      account.coins
+    ).toBe(10);
+
+    expect(
+      account.ksh
+    ).toBe(10);
   });
 
-  it("maps a 402 to a shortfall", async () => {
+  it("maps unlocked materials correctly", () => {
+    const account =
+      toServerAccount(
+        ACCOUNT
+      );
+
+    expect(
+      account.unlocked
+    ).toEqual(["m1"]);
+  });
+
+  it("maps material pricing correctly", () => {
+    const account =
+      toServerAccount(
+        ACCOUNT
+      );
+
+    expect(
+      account.prices.materialCoins
+    ).toBe(5);
+
+    expect(
+      account.prices.kshPerCoin
+    ).toBe(1);
+
+    expect(
+      account.prices.dailyCap
+    ).toBe(0);
+  });
+
+  it("keeps subscription data as null when no subscription exists", () => {
+    const account =
+      toServerAccount({
+        ...ACCOUNT,
+        subscription: null,
+      });
+
+    expect(
+      account.subscription
+    ).toBeNull();
+  });
+
+  it("maps legacy subscription data without affecting the wallet", () => {
+    const account =
+      toServerAccount({
+        ...ACCOUNT,
+        subscription: {
+          grade_key: "cbc-7",
+          expires_at:
+            "2026-10-26 12:00:00",
+          active: true,
+        },
+      });
+
+    expect(
+      account.subscription
+    ).toEqual({
+      gradeKey: "cbc-7",
+      expiresAt:
+        "2026-10-26 12:00:00",
+      active: true,
+    });
+
+    expect(
+      account.coins
+    ).toBe(10);
+
+    expect(
+      account.ksh
+    ).toBe(10);
+  });
+});
+
+
+// ============================================================
+// unlockMaterial
+// ============================================================
+
+describe("unlockMaterial", () => {
+  it("unlocks a material using the paid wallet", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            coins: 5,
+            ksh: 5,
+            coins_spent: 5,
+            ksh_spent: 0,
+            already_unlocked:
+              false,
+          }
+        )
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
+
+    const result =
+      await unlockMaterial(
+        "m9"
+      );
+
+    expect(result).toEqual({
+      status: "unlocked",
+      coinsSpent: 5,
+      kshSpent: 0,
+      alreadyUnlocked: false,
+    });
+
+    expect(
+      applyAccount
+    ).toHaveBeenCalled();
+
+    expect(
+      showInLibrary
+    ).toHaveBeenCalledWith(
+      "m9"
+    );
+  });
+
+  it("sends the material unlock request to the server", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            coins_spent: 5,
+            ksh_spent: 0,
+            already_unlocked:
+              false,
+          }
+        )
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
+
+    await unlockMaterial(
+      "m9"
+    );
+
+    const calls =
+      sentBodies(fetchMock);
+
+    expect(
+      calls[0].url
+    ).toBe("/api/unlocks");
+
+    expect(
+      calls[0].body
+    ).toMatchObject({
+      soma_hub_code:
+        "SH-ABC123",
+      material_id: "m9",
+    });
+  });
+
+  it("maps insufficient paid wallet balance to a shortfall", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        jsonResponse(402, {
-          success: false,
-          message: "Not enough coins",
-          coins: 2,
-          ksh: 50,
-          price: 5,
-          shortfall_coins: 3,
-          ksh_needed: 3,
-          can_pay_with_ksh: true,
-        }),
-      ),
+        jsonResponse(
+          402,
+          {
+            success: false,
+            message:
+              "Not enough wallet balance",
+            coins: 2,
+            ksh: 2,
+            price: 5,
+            shortfall_coins: 3,
+            ksh_needed: 3,
+            can_pay_with_ksh:
+              true,
+          }
+        )
+      )
     );
 
-    expect(await unlockMaterial("m9")).toEqual({
+    expect(
+      await unlockMaterial(
+        "m9"
+      )
+    ).toEqual({
       status: "short",
       coins: 2,
-      ksh: 50,
+      ksh: 2,
       price: 5,
       shortfallCoins: 3,
       kshNeeded: 3,
@@ -187,88 +479,224 @@ describe("unlockMaterial", () => {
     });
   });
 
-  it("sends allow_ksh when confirmed", async () => {
-    const fetchMock = vi.fn(async () =>
-      jsonResponse(200, { ...ACCOUNT, coins_spent: 2, ksh_spent: 3, already_unlocked: false }),
+  it("sends allow_ksh when explicitly confirmed", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            coins_spent: 2,
+            ksh_spent: 3,
+            already_unlocked:
+              false,
+          }
+        )
     );
-    vi.stubGlobal("fetch", fetchMock);
 
-    await unlockMaterial("m9", true);
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
 
-    expect(sentBodies(fetchMock)[0].body.allow_ksh).toBe(true);
+    await unlockMaterial(
+      "m9",
+      true
+    );
+
+    expect(
+      sentBodies(fetchMock)[0]
+        .body.allow_ksh
+    ).toBe(true);
+  });
+
+  it("does not send allow_ksh by default", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            coins_spent: 5,
+            ksh_spent: 0,
+            already_unlocked:
+              false,
+          }
+        )
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
+
+    await unlockMaterial(
+      "m9"
+    );
+
+    expect(
+      sentBodies(fetchMock)[0]
+        .body.allow_ksh
+    ).not.toBe(true);
+  });
+
+  it("handles an already unlocked material", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            unlocked: [
+              "m1",
+              "m9",
+            ],
+            coins_spent: 0,
+            ksh_spent: 0,
+            already_unlocked:
+              true,
+          }
+        )
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
+
+    const result =
+      await unlockMaterial(
+        "m9"
+      );
+
+    expect(result).toEqual({
+      status: "unlocked",
+      coinsSpent: 0,
+      kshSpent: 0,
+      alreadyUnlocked: true,
+    });
+
+    expect(
+      showInLibrary
+    ).toHaveBeenCalledWith(
+      "m9"
+    );
   });
 
   it("returns an error when offline", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
-
-    const result = await unlockMaterial("m9");
-
-    expect(result.status).toBe("error");
-  });
-});
-
-describe("syncAccount", () => {
-  it("imports local coins and all local unlocks the first time", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse(200, { ...ACCOUNT, imported: false, coins: 0, unlocked: [] }))
-      .mockResolvedValueOnce(jsonResponse(200, ACCOUNT));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await syncAccount();
-
-    const calls = sentBodies(fetchMock);
-    expect(calls[1]).toEqual({
-      url: "/api/account/import",
-      body: { soma_hub_code: "SH-ABC123", coins: 80, unlocked: ["m1", "m2"] },
-    });
-    expect(applyAccount).toHaveBeenLastCalledWith(expect.objectContaining({ coins: 10 }));
-  });
-
-  it("skips the import once done", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse(200, ACCOUNT));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await syncAccount();
-
-    expect(sentBodies(fetchMock).map((c) => c.url)).toEqual(["/api/account/SH-ABC123"]);
-  });
-});
-
-describe("subscriptions", () => {
-  it("maps the subscription and its prices", () => {
-    const account = toServerAccount({
-      ...ACCOUNT,
-      prices: { ...ACCOUNT.prices, subscription_ksh: 100, subscription_days: 30 },
-      subscription: { grade_key: "cbc-7", expires_at: "2026-10-26 12:00:00", active: true },
-    });
-
-    expect(account.subscription).toEqual({ gradeKey: "cbc-7", expiresAt: "2026-10-26 12:00:00", active: true });
-    expect(account.prices.subscriptionKsh).toBe(100);
-    expect(account.prices.subscriptionDays).toBe(30);
-  });
-
-  it("maps no subscription to null", () => {
-    expect(toServerAccount({ ...ACCOUNT, subscription: null } as never).subscription).toBeNull();
-  });
-
-  it("subscribes from the wallet", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse(200, ACCOUNT));
-    vi.stubGlobal("fetch", fetchMock);
-
-    expect(await subscribeFromWallet("req-1")).toEqual({ status: "subscribed" });
-    expect(sentBodies(fetchMock)[0]).toEqual({
-      url: "/api/subscriptions",
-      body: { soma_hub_code: "SH-ABC123", request_id: "req-1" },
-    });
-  });
-
-  it("reports how much KSh is missing", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse(402, { success: false, ksh: 40, ksh_needed: 60 })),
+      vi.fn(async () => {
+        throw new TypeError(
+          "offline"
+        );
+      })
     );
 
-    expect(await subscribeFromWallet()).toEqual({ status: "short", ksh: 40, kshNeeded: 60 });
+    const result =
+      await unlockMaterial(
+        "m9"
+      );
+
+    expect(
+      result.status
+    ).toBe("error");
+  });
+});
+
+
+// ============================================================
+// No free reward APIs
+// ============================================================
+
+describe("paid-wallet economy", () => {
+  it("does not expose reward or coin-purchase behavior through account syncing", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          ACCOUNT
+        )
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
+
+    await syncAccount();
+
+    const urls =
+      sentBodies(fetchMock).map(
+        (call) => call.url
+      );
+
+    expect(
+      urls.some(
+        (url) =>
+          url ===
+          "/api/coins/reward"
+      )
+    ).toBe(false);
+
+    expect(
+      urls.some(
+        (url) =>
+          url ===
+          "/api/coins/buy"
+      )
+    ).toBe(false);
+
+    expect(
+      urls.some(
+        (url) =>
+          url ===
+          "/api/dev/grant-coins"
+      )
+    ).toBe(false);
+  });
+
+  it("never converts local wallet state into a server deposit", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        jsonResponse(
+          200,
+          {
+            ...ACCOUNT,
+            coins: 0,
+            ksh: 0,
+          }
+        )
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      fetchMock
+    );
+
+    await syncAccount();
+
+    const urls =
+      sentBodies(fetchMock).map(
+        (call) => call.url
+      );
+
+    expect(
+      urls
+    ).not.toContain(
+      "/api/account/import"
+    );
+
+    expect(
+      urls
+    ).not.toContain(
+      "/api/coins/reward"
+    );
+
+    expect(
+      urls
+    ).not.toContain(
+      "/api/coins/buy"
+    );
   });
 });

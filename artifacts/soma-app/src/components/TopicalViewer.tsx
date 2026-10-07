@@ -8,7 +8,6 @@ import {
 } from "@/data/questions";
 
 import { useSomaStore } from "@/lib/storage";
-import { claimReward } from "@/lib/account";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -25,15 +24,12 @@ import {
 
 import { TopicNotesOverlay } from "./TopicNotesOverlay";
 
-
 interface Props {
   material: Material;
   onClose: () => void;
 }
 
-
 const TOTAL_QUESTIONS = 15;
-
 
 export function TopicalViewer({
   material,
@@ -51,13 +47,12 @@ export function TopicalViewer({
     (s) => s.clearQuizProgress
   );
 
-
   // Resume an in-progress attempt if one exists,
   // otherwise build a fresh set.
   const [questions] = useState<Question[]>(() => {
     const p =
       useSomaStore.getState().quizProgress[
-      material.id
+        material.id
       ];
 
     if (
@@ -75,31 +70,26 @@ export function TopicalViewer({
     );
   });
 
-
   const resumed =
     useSomaStore.getState().quizProgress[
-    material.id
+      material.id
     ];
-
 
   const [currentIndex, setCurrentIndex] =
     useState(
       resumed?.type === "topical"
         ? Math.min(
-          resumed.currentIndex,
-          questions.length - 1
-        )
+            resumed.currentIndex,
+            questions.length - 1
+          )
         : 0
     );
-
 
   const [selectedOption, setSelectedOption] =
     useState<string>("");
 
-
   const [hasChecked, setHasChecked] =
     useState(false);
-
 
   const [score, setScore] =
     useState(
@@ -108,36 +98,28 @@ export function TopicalViewer({
         : 0
     );
 
-
   const [isFinished, setIsFinished] =
     useState(false);
-
 
   const [resultSaved, setResultSaved] =
     useState(false);
 
-
   const [reward, setReward] = useState<{
     xpEarned: number;
-    coinsEarned: number;
     streak: number;
   } | null>(null);
-
 
   const [notesOpen, setNotesOpen] =
     useState(false);
 
-
   const currentQ =
     questions[currentIndex];
-
 
   const answeredWrong =
     hasChecked &&
     !!currentQ &&
     parseInt(selectedOption) !==
-    currentQ.correct;
-
+      currentQ.correct;
 
   // Persist progress so the learner can leave
   // and come back.
@@ -172,7 +154,6 @@ export function TopicalViewer({
     isFinished,
   ]);
 
-
   const handleCheck = () => {
     if (!selectedOption || !currentQ) {
       return;
@@ -187,7 +168,6 @@ export function TopicalViewer({
       setScore((s) => s + 1);
     }
   };
-
 
   const handleNext = () => {
     if (
@@ -205,7 +185,6 @@ export function TopicalViewer({
       setIsFinished(true);
     }
   };
-
 
   useEffect(() => {
     if (
@@ -229,15 +208,13 @@ export function TopicalViewer({
         percentage: pct,
       });
 
-      void claimReward({
-        materialId: material.id,
-        type: "topical",
-        percentage: pct,
-      });
+      // IMPORTANT:
+      // Quiz completion does NOT award SOMA Points.
+      // addQuizResult() still handles XP, streaks,
+      // term performance points, and quiz history.
 
       setReward({
         xpEarned: r.xpEarned,
-        coinsEarned: r.coinsEarned,
         streak: r.streak.count,
       });
 
@@ -248,7 +225,6 @@ export function TopicalViewer({
       setResultSaved(true);
     }
   }, [isFinished]);
-
 
   // ============================================================
   // FINISHED SCREEN
@@ -268,7 +244,6 @@ export function TopicalViewer({
         (score / questions.length) * 100
       );
 
-
     const emoji =
       percentage >= 80
         ? "🏆"
@@ -278,7 +253,6 @@ export function TopicalViewer({
             ? "👍"
             : "📚";
 
-
     const message =
       percentage >= 80
         ? "Outstanding! Keep it up!"
@@ -287,7 +261,6 @@ export function TopicalViewer({
           : percentage >= 40
             ? "Good effort! Keep practising!"
             : "Don't give up! Try again!";
-
 
     return (
       <>
@@ -320,7 +293,6 @@ export function TopicalViewer({
             duration: 0.4,
           }}
         >
-
           <motion.div
             className="text-8xl mb-4"
             animate={{
@@ -345,32 +317,35 @@ export function TopicalViewer({
             {emoji}
           </motion.div>
 
-
-          <h2 className="
-            text-3xl
-            font-extrabold
-            mb-2
-          ">
+          <h2
+            className="
+              text-3xl
+              font-extrabold
+              mb-2
+            "
+          >
             Quiz Complete!
           </h2>
 
-
-          <p className="
-            text-lg
-            opacity-70
-            mb-1
-          ">
+          <p
+            className="
+              text-lg
+              opacity-70
+              mb-1
+            "
+          >
             {material.subject}
           </p>
 
-
-          <div className="
-            flex
-            flex-wrap
-            justify-center
-            gap-2
-            mb-6
-          ">
+          <div
+            className="
+              flex
+              flex-wrap
+              justify-center
+              gap-2
+              mb-6
+            "
+          >
             {material.topics.map(
               (t, i) => (
                 <span
@@ -393,7 +368,6 @@ export function TopicalViewer({
             )}
           </div>
 
-
           <div
             className="
               w-36
@@ -413,22 +387,25 @@ export function TopicalViewer({
                 "4px solid rgba(255,255,255,0.3)",
             }}
           >
-            <span className="
-              text-4xl
-              font-extrabold
-            ">
+            <span
+              className="
+                text-4xl
+                font-extrabold
+              "
+            >
               {percentage}%
             </span>
 
-            <span className="
-              text-sm
-              opacity-70
-              mt-1
-            ">
+            <span
+              className="
+                text-sm
+                opacity-70
+                mt-1
+              "
+            >
               {score}/{questions.length}
             </span>
           </div>
-
 
           <p
             className="
@@ -442,7 +419,6 @@ export function TopicalViewer({
           >
             {message}
           </p>
-
 
           <div
             className="
@@ -473,7 +449,6 @@ export function TopicalViewer({
                   : "NEEDS WORK"}
           </div>
 
-
           {reward && (
             <motion.div
               className="
@@ -493,7 +468,6 @@ export function TopicalViewer({
                 delay: 0.4,
               }}
             >
-
               <span
                 className="
                   px-3
@@ -509,24 +483,6 @@ export function TopicalViewer({
               >
                 +{reward.xpEarned} XP
               </span>
-
-
-              <span
-                className="
-                  px-3
-                  py-1.5
-                  rounded-full
-                  text-sm
-                  font-bold
-                "
-                style={{
-                  background:
-                    "rgba(255,255,255,0.15)",
-                }}
-              >
-                🪙 +{reward.coinsEarned}
-              </span>
-
 
               {reward.streak > 1 && (
                 <span
@@ -545,22 +501,24 @@ export function TopicalViewer({
                   🔥 {reward.streak}-day streak
                 </span>
               )}
-
             </motion.div>
           )}
 
-
-          <div className="
-            w-full
-            max-w-xs
-            mb-8
-          ">
-            <div className="
-              h-3
-              rounded-full
-              bg-white/20
-              overflow-hidden
-            ">
+          <div
+            className="
+              w-full
+              max-w-xs
+              mb-8
+            "
+          >
+            <div
+              className="
+                h-3
+                rounded-full
+                bg-white/20
+                overflow-hidden
+              "
+            >
               <motion.div
                 className="
                   h-full
@@ -591,14 +549,14 @@ export function TopicalViewer({
             </div>
           </div>
 
-
-          <div className="
-            flex
-            flex-col
-            sm:flex-row
-            gap-3
-          ">
-
+          <div
+            className="
+              flex
+              flex-col
+              sm:flex-row
+              gap-3
+            "
+          >
             {score < questions.length && (
               <Button
                 size="lg"
@@ -622,7 +580,6 @@ export function TopicalViewer({
               </Button>
             )}
 
-
             <Button
               size="lg"
               className="
@@ -641,27 +598,24 @@ export function TopicalViewer({
             >
               Back to Dashboard
             </Button>
-
           </div>
-
         </motion.div>
       </>
     );
   }
 
-
   // ============================================================
   // STUDY NOTES AFTER FINISHING
   // ============================================================
   //
-  // This is the actual correction.
+  // This remains unchanged.
   // Once Review the notes is clicked:
   //
   // isFinished = true
   // notesOpen = true
   //
   // Therefore the finished screen above is skipped and
-  // TopicNotesOverlay becomes the only rendered view.
+  // TopicNotesOverlay becomes the active view.
   // ============================================================
 
   if (
@@ -678,11 +632,9 @@ export function TopicalViewer({
     );
   }
 
-
   if (!currentQ) {
     return null;
   }
-
 
   const progress =
     (
@@ -694,27 +646,27 @@ export function TopicalViewer({
     ) *
     100;
 
-
   // ============================================================
   // ACTIVE QUIZ
   // ============================================================
 
   return (
-    <div className="
-      flex
-      flex-col
-      min-h-full
-      bg-card
-      rounded-xl
-      shadow-2xl
-      overflow-hidden
-      max-w-4xl
-      mx-auto
-      mt-4
-      mb-4
-      border
-    ">
-
+    <div
+      className="
+        flex
+        flex-col
+        min-h-full
+        bg-card
+        rounded-xl
+        shadow-2xl
+        overflow-hidden
+        max-w-4xl
+        mx-auto
+        mt-4
+        mb-4
+        border
+      "
+    >
       {/* Header */}
 
       <div
@@ -730,24 +682,25 @@ export function TopicalViewer({
             "linear-gradient(90deg, #1a3a5c, #1e5799)",
         }}
       >
-
         <div>
-
-          <h2 className="
-            font-bold
-            text-xl
-            text-white
-          ">
+          <h2
+            className="
+              font-bold
+              text-xl
+              text-white
+            "
+          >
             {material.subject}
           </h2>
 
-
-          <div className="
-            flex
-            flex-wrap
-            gap-1
-            mt-0.5
-          ">
+          <div
+            className="
+              flex
+              flex-wrap
+              gap-1
+              mt-0.5
+            "
+          >
             {material.topics.map(
               (t, i) => (
                 <span
@@ -765,18 +718,17 @@ export function TopicalViewer({
             )}
           </div>
 
-
-          <div className="
-            text-sm
-            text-white/70
-            mt-1
-          ">
+          <div
+            className="
+              text-sm
+              text-white/70
+              mt-1
+            "
+          >
             Question {currentIndex + 1} of{" "}
             {questions.length}
           </div>
-
         </div>
-
 
         <Button
           variant="ghost"
@@ -789,16 +741,16 @@ export function TopicalViewer({
         >
           <X className="h-6 w-6" />
         </Button>
-
       </div>
-
 
       {/* Progress bar */}
 
-      <div className="
-        h-1.5
-        bg-muted
-      ">
+      <div
+        className="
+          h-1.5
+          bg-muted
+        "
+      >
         <motion.div
           className="h-full"
           style={{
@@ -813,16 +765,15 @@ export function TopicalViewer({
         />
       </div>
 
-
-      <div className="
-        p-8
-        flex-1
-        flex
-        flex-col
-      ">
-
+      <div
+        className="
+          p-8
+          flex-1
+          flex
+          flex-col
+        "
+      >
         <AnimatePresence mode="wait">
-
           <motion.div
             key={currentIndex}
             initial={{
@@ -841,16 +792,16 @@ export function TopicalViewer({
               duration: 0.25,
             }}
           >
-
-            <div className="
-              text-2xl
-              font-medium
-              mb-10
-              leading-relaxed
-            ">
+            <div
+              className="
+                text-2xl
+                font-medium
+                mb-10
+                leading-relaxed
+              "
+            >
               {currentQ.text}
             </div>
-
 
             <RadioGroup
               value={selectedOption}
@@ -860,7 +811,6 @@ export function TopicalViewer({
               disabled={hasChecked}
               className="space-y-4"
             >
-
               {currentQ.options.map(
                 (opt, i) => (
                   <div
@@ -873,20 +823,20 @@ export function TopicalViewer({
                       rounded-xl
                       border-2
                       transition-all
-                      ${hasChecked &&
+                      ${
+                        hasChecked &&
                         i === currentQ.correct
-                        ? "border-green-500 bg-green-50 text-green-900"
-                        : hasChecked &&
-                          selectedOption ===
-                          i.toString() &&
-                          i !==
-                          currentQ.correct
-                          ? "border-red-500 bg-red-50 text-red-900"
-                          : "border-muted hover:border-primary/50"
+                          ? "border-green-500 bg-green-50 text-green-900"
+                          : hasChecked &&
+                              selectedOption ===
+                                i.toString() &&
+                              i !==
+                                currentQ.correct
+                            ? "border-red-500 bg-red-50 text-red-900"
+                            : "border-muted hover:border-primary/50"
                       }
                     `}
                   >
-
                     <RadioGroupItem
                       value={i.toString()}
                       id={`opt-${i}`}
@@ -895,7 +845,6 @@ export function TopicalViewer({
                         h-5
                       "
                     />
-
 
                     <Label
                       htmlFor={`opt-${i}`}
@@ -909,51 +858,47 @@ export function TopicalViewer({
                       {opt}
                     </Label>
 
-
                     {hasChecked &&
                       i ===
-                      currentQ.correct && (
-                        <span className="
-                          text-green-600
-                          font-bold
-                          text-xl
-                        ">
+                        currentQ.correct && (
+                        <span
+                          className="
+                            text-green-600
+                            font-bold
+                            text-xl
+                          "
+                        >
                           ✓
                         </span>
                       )}
 
-
                     {hasChecked &&
                       selectedOption ===
-                      i.toString() &&
+                        i.toString() &&
                       i !==
-                      currentQ.correct && (
-                        <span className="
-                          text-red-600
-                          font-bold
-                          text-xl
-                        ">
+                        currentQ.correct && (
+                        <span
+                          className="
+                            text-red-600
+                            font-bold
+                            text-xl
+                          "
+                        >
                           ✗
                         </span>
                       )}
-
                   </div>
                 )
               )}
-
             </RadioGroup>
-
           </motion.div>
-
         </AnimatePresence>
-
 
         {hasChecked &&
           (
             currentQ.explanation ||
             answeredWrong
           ) && (
-
             <motion.div
               initial={{
                 opacity: 0,
@@ -974,22 +919,20 @@ export function TopicalViewer({
                 leading-relaxed
               "
             >
-
               {currentQ.explanation && (
                 <p>
-
-                  <span className="
-                    font-bold
-                    text-primary
-                  ">
+                  <span
+                    className="
+                      font-bold
+                      text-primary
+                    "
+                  >
                     Why:{" "}
                   </span>
 
                   {currentQ.explanation}
-
                 </p>
               )}
-
 
               {answeredWrong && (
                 <Button
@@ -1011,25 +954,25 @@ export function TopicalViewer({
                   Learn more about this topic
                 </Button>
               )}
-
             </motion.div>
           )}
 
-
-        <div className="
-          mt-auto
-          pt-8
-          flex
-          justify-between
-          items-center
-          gap-4
-        ">
-
-          <div className="
-            text-xl
-            font-bold
-          ">
-
+        <div
+          className="
+            mt-auto
+            pt-8
+            flex
+            justify-between
+            items-center
+            gap-4
+          "
+        >
+          <div
+            className="
+              text-xl
+              font-bold
+            "
+          >
             {hasChecked &&
               (
                 parseInt(
@@ -1037,32 +980,33 @@ export function TopicalViewer({
                 ) ===
                   currentQ.correct
                   ? (
-                    <span className="
-                      text-green-600
-                    ">
+                    <span
+                      className="
+                        text-green-600
+                      "
+                    >
                       ✅ CORRECT!
                     </span>
                   )
                   : (
-                    <span className="
-                      text-red-600
-                      text-base
-                    ">
+                    <span
+                      className="
+                        text-red-600
+                        text-base
+                      "
+                    >
                       ❌ Answer:{" "}
                       {
                         currentQ.options[
-                        currentQ.correct
+                          currentQ.correct
                         ]
                       }
                     </span>
                   )
               )}
-
           </div>
 
-
           {!hasChecked ? (
-
             <Button
               size="lg"
               className="
@@ -1076,9 +1020,7 @@ export function TopicalViewer({
             >
               CHECK ANSWER
             </Button>
-
           ) : (
-
             <Button
               size="lg"
               className="
@@ -1095,17 +1037,13 @@ export function TopicalViewer({
               onClick={handleNext}
             >
               {currentIndex <
-                questions.length - 1
+              questions.length - 1
                 ? "NEXT ➔"
                 : "SEE RESULTS"}
             </Button>
-
           )}
-
         </div>
-
       </div>
-
 
       {/* Study notes while answering */}
 
@@ -1117,7 +1055,6 @@ export function TopicalViewer({
           }
         />
       )}
-
     </div>
   );
 }
