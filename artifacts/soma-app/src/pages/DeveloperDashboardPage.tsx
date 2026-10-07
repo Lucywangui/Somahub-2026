@@ -60,8 +60,8 @@ interface StudentResponse {
   success: boolean;
   message?: string;
   student: StudentDetails;
-  term_points: TermPoints[];
-  quiz_results: QuizResult[];
+  term_points?: TermPoints[];
+  quiz_results?: QuizResult[];
 }
 
 export default function DeveloperDashboardPage({
@@ -72,8 +72,10 @@ export default function DeveloperDashboardPage({
   const [searchCode, setSearchCode] = useState("");
   const [selectedStudent, setSelectedStudent] =
     useState<StudentResponse | null>(null);
+
   const [loadingStudents, setLoadingStudents] = useState(true);
   const [loadingStudent, setLoadingStudent] = useState(false);
+
   const [error, setError] = useState("");
   const [studentError, setStudentError] = useState("");
 
@@ -120,10 +122,17 @@ export default function DeveloperDashboardPage({
     }
   }
 
-  async function searchStudent(event?: React.FormEvent) {
+  async function searchStudent(
+    event?: React.FormEvent,
+    codeOverride?: string
+  ) {
     event?.preventDefault();
 
-    const code = searchCode.trim().toUpperCase();
+    const code = (
+      codeOverride ?? searchCode
+    )
+      .trim()
+      .toUpperCase();
 
     if (!code) {
       setStudentError("Enter a SOMA HUB Code.");
@@ -156,7 +165,17 @@ export default function DeveloperDashboardPage({
         );
       }
 
-      setSelectedStudent(data);
+      const normalizedStudent: StudentResponse = {
+        ...data,
+        term_points: Array.isArray(data.term_points)
+          ? data.term_points
+          : [],
+        quiz_results: Array.isArray(data.quiz_results)
+          ? data.quiz_results
+          : [],
+      };
+
+      setSelectedStudent(normalizedStudent);
     } catch (err) {
       setStudentError(
         err instanceof Error
@@ -206,9 +225,11 @@ export default function DeveloperDashboardPage({
     return `Term ${term} • ${year}`;
   }
 
+  const termPoints = selectedStudent?.term_points ?? [];
+  const quizResults = selectedStudent?.quiz_results ?? [];
+
   return (
     <div className="min-h-screen bg-slate-100">
-      {/* HEADER */}
       <header className="bg-slate-950 text-white">
         <div className="max-w-7xl mx-auto px-5 py-5 flex items-center justify-between gap-4">
           <div>
@@ -236,7 +257,6 @@ export default function DeveloperDashboardPage({
       </header>
 
       <main className="max-w-7xl mx-auto px-5 py-7 space-y-7">
-        {/* FIND STUDENT */}
         <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
           <div className="mb-4">
             <h2 className="text-xl font-bold text-slate-900">
@@ -282,7 +302,6 @@ export default function DeveloperDashboardPage({
           )}
         </section>
 
-        {/* SELECTED STUDENT */}
         {selectedStudent && (
           <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
             <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-6">
@@ -311,7 +330,6 @@ export default function DeveloperDashboardPage({
               </button>
             </div>
 
-            {/* PROFILE INFORMATION */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="rounded-xl bg-slate-50 p-4">
                 <p className="text-xs font-semibold text-slate-500 uppercase">
@@ -353,8 +371,7 @@ export default function DeveloperDashboardPage({
                 </p>
 
                 <p className="text-2xl font-bold text-blue-700 mt-1">
-                  {selectedStudent.term_points[0]
-                    ?.total_points ?? 0}
+                  {termPoints[0]?.total_points ?? 0}
 
                   <span className="text-sm font-medium ml-1">
                     / 100
@@ -363,91 +380,85 @@ export default function DeveloperDashboardPage({
               </div>
             </div>
 
-            {/* TERM PERFORMANCE */}
             <div className="mt-7">
               <h3 className="text-lg font-bold text-slate-900 mb-3">
                 Term Performance
               </h3>
 
-              {selectedStudent.term_points.length === 0 ? (
+              {termPoints.length === 0 ? (
                 <div className="rounded-xl bg-slate-50 p-5 text-sm text-slate-500">
                   No performance data has been synchronized yet.
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {selectedStudent.term_points.map(
-                    (term) => (
-                      <div
-                        key={term.term_key}
-                        className="rounded-xl border border-slate-200 p-4"
-                      >
-                        <div className="flex items-center justify-between mb-3">
-                          <p className="font-bold text-slate-900">
-                            {getTermLabel(
-                              term.term_key
-                            )}
-                          </p>
+                  {termPoints.map((term) => (
+                    <div
+                      key={term.term_key}
+                      className="rounded-xl border border-slate-200 p-4"
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="font-bold text-slate-900">
+                          {getTermLabel(
+                            term.term_key
+                          )}
+                        </p>
 
-                          <p className="font-bold text-blue-600">
-                            {term.total_points} / 100
-                          </p>
-                        </div>
-
-                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
-                          <PointBox
-                            label="Study Notes"
-                            value={
-                              term.study_notes_points
-                            }
-                            max={20}
-                          />
-
-                          <PointBox
-                            label="Topical Quizzes"
-                            value={
-                              term.topical_quiz_points
-                            }
-                            max={25}
-                          />
-
-                          <PointBox
-                            label="Exams"
-                            value={
-                              term.exam_points
-                            }
-                            max={25}
-                          />
-
-                          <PointBox
-                            label="Consistency"
-                            value={
-                              term.consistency_points
-                            }
-                            max={15}
-                          />
-
-                          <PointBox
-                            label="Improvement"
-                            value={
-                              term.improvement_points
-                            }
-                            max={15}
-                          />
-                        </div>
+                        <p className="font-bold text-blue-600">
+                          {term.total_points} / 100
+                        </p>
                       </div>
-                    )
-                  )}
+
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
+                        <PointBox
+                          label="Study Notes"
+                          value={
+                            term.study_notes_points
+                          }
+                          max={20}
+                        />
+
+                        <PointBox
+                          label="Topical Quizzes"
+                          value={
+                            term.topical_quiz_points
+                          }
+                          max={25}
+                        />
+
+                        <PointBox
+                          label="Exams"
+                          value={term.exam_points}
+                          max={25}
+                        />
+
+                        <PointBox
+                          label="Consistency"
+                          value={
+                            term.consistency_points
+                          }
+                          max={15}
+                        />
+
+                        <PointBox
+                          label="Improvement"
+                          value={
+                            term.improvement_points
+                          }
+                          max={15}
+                        />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
 
-            {/* QUIZ RESULTS */}
             <div className="mt-7">
               <h3 className="text-lg font-bold text-slate-900 mb-3">
                 Quiz Results
               </h3>
 
-              {selectedStudent.quiz_results.length === 0 ? (
+              {quizResults.length === 0 ? (
                 <div className="rounded-xl bg-slate-50 p-5 text-sm text-slate-500">
                   No quiz results have been synchronized yet.
                 </div>
@@ -483,7 +494,7 @@ export default function DeveloperDashboardPage({
                     </thead>
 
                     <tbody>
-                      {selectedStudent.quiz_results.map(
+                      {quizResults.map(
                         (result, index) => (
                           <tr
                             key={`${result.material_id}-${result.completed_at}-${index}`}
@@ -527,7 +538,6 @@ export default function DeveloperDashboardPage({
           </section>
         )}
 
-        {/* TOP 100 */}
         <section className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
           <div className="p-5 border-b border-slate-200">
             <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
@@ -654,7 +664,10 @@ export default function DeveloperDashboardPage({
 
                             setSelectedStudent(null);
 
-                            searchStudent();
+                            searchStudent(
+                              undefined,
+                              student.soma_hub_code
+                            );
                           }}
                           className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
                         >
