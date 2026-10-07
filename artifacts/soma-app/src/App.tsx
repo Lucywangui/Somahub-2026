@@ -4,7 +4,6 @@ import { Toaster as HookToaster } from "@/components/ui/toaster";
 
 import { useSomaStore } from "./lib/storage";
 import { syncAccount } from "./lib/account";
-import { resolveGrade } from "./data/grade";
 
 import WelcomePage from "./pages/WelcomePage";
 import { NamePage } from "./pages/NamePage";
@@ -41,8 +40,22 @@ function App() {
     logout,
   } = useSomaStore();
 
-  const [currentPage, setCurrentPage] =
-    useState<PageState>("welcome");
+  /*
+   * Start directly on the developer login page when
+   * ?developer is present in the URL.
+   *
+   * This is initialized before the normal student
+   * onboarding effect runs, so it cannot be overwritten.
+   */
+  const [currentPage, setCurrentPage] = useState<PageState>(() => {
+    const params = new URLSearchParams(window.location.search);
+
+    if (params.has("developer")) {
+      return "developer-login";
+    }
+
+    return "welcome";
+  });
 
   const [viewerMaterialId, setViewerMaterialId] =
     useState<string | null>(null);
@@ -51,25 +64,7 @@ function App() {
     useState(false);
 
   /*
-   * Hidden developer access.
-   *
-   * Open:
-   * https://somaahub.co.ke/?developer
-   *
-   * This does not show any developer button
-   * on the normal student interface.
-   */
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-
-    if (params.has("developer")) {
-      setCurrentPage("developer-login");
-    }
-  }, []);
-
-  /*
-   * Load coins, KSh and unlocks from the server, and send any
-   * quiz rewards earned offline once the connection is back.
+   * Load the student's account when the dashboard is open.
    */
   const onDashboard = currentPage === "dashboard";
 
@@ -91,15 +86,14 @@ function App() {
 
   /*
    * Check the normal student onboarding state.
+   *
+   * Developer pages are completely excluded from this logic.
    */
   useEffect(() => {
-    if (developerLoggedIn) {
-      return;
-    }
-
     if (
       currentPage === "developer-login" ||
-      currentPage === "developer-dashboard"
+      currentPage === "developer-dashboard" ||
+      developerLoggedIn
     ) {
       return;
     }
@@ -249,9 +243,7 @@ function App() {
   }
 
   /*
-   * Welcome page.
-   *
-   * No developer button is displayed here.
+   * Normal student welcome page.
    */
   if (currentPage === "welcome") {
     return (
