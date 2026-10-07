@@ -1716,7 +1716,7 @@ def admin_top_students():
             ORDER BY
                 total_points DESC,
                 s.name ASC
-            LIMIT 50
+            LIMIT 100
             """
         ).fetchall()
 
