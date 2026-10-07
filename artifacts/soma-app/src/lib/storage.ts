@@ -65,9 +65,7 @@ export function subscriptionCovers(
   return (
     !!subscription &&
     subscription.active &&
-    materialId.startsWith(
-      subscription.gradeKey + "-"
-    )
+    materialId.startsWith(subscription.gradeKey + "-")
   );
 }
 
@@ -145,7 +143,6 @@ export const CONSISTENCY_TERM_POINTS = 2;
  */
 export const PROGRESS_PERCENTAGE_STEP = 5;
 export const PROGRESS_POINTS_PER_STEP = 1;
-
 export const MAX_TERM_POINTS = 100;
 
 export function getTermPointsTotal(
@@ -292,7 +289,8 @@ export async function syncStudentToBackend(data: {
   try {
     const response =
       await fetch(
-        `${SOMA_API_BASE_URL}/api/students/register`,
+        SOMA_API_BASE_URL +
+          "/api/students/register",
         {
           method: "POST",
           headers: {
@@ -356,71 +354,64 @@ async function syncStudentPerformanceToBackend(
 
   try {
     const response = await fetch(
-      `${SOMA_API_BASE_URL}/api/students/performance`,
+      SOMA_API_BASE_URL +
+        "/api/students/performance",
       {
         method: "POST",
         headers: {
           "Content-Type":
             "application/json",
         },
+
+        /*
+         * IMPORTANT:
+         * These top-level keys match the backend performance API.
+         * The calculations above are not changed.
+         */
         body: JSON.stringify({
-          soma_hub_code:
+          somaHubCode:
             data.soma_hub_code,
 
-          term_points:
+          termPoints:
             data.term_points.map(
               (term) => ({
-                term_key:
+                termKey:
                   `${term.year}-T${term.term}`,
-
-                study_notes_points:
+                studyNotes:
                   term.studyNotes,
-
-                topical_quiz_points:
+                topicalQuizzes:
                   term.topicalQuizzes,
-
-                exam_points:
+                exams:
                   term.exams,
-
-                consistency_points:
+                consistency:
                   term.consistency,
-
-                improvement_points:
+                progress:
                   term.progress,
-
-                total_points:
+                totalPoints:
                   getTermPointsTotal(term),
               })
             ),
 
-          quiz_results:
+          quizResults:
             data.quiz_results.map(
               (result) => ({
-                material_id:
+                materialId:
                   result.materialId,
-
-                material_title:
+                materialTitle:
                   result.materialTitle,
-
                 subject:
                   result.subject,
-
-                grade_key:
+                gradeKey:
                   result.gradeKey,
-
-                quiz_type:
+                type:
                   result.type,
-
                 score:
                   result.score,
-
                 total:
                   result.total,
-
                 percentage:
                   result.percentage,
-
-                completed_at:
+                date:
                   result.date,
               })
             ),
@@ -483,7 +474,6 @@ interface SomaState {
 
   prices: Prices;
   subscription: Subscription | null;
-
   xp: number;
   streak: Streak;
   dailyGoal: number;
@@ -498,16 +488,11 @@ interface SomaState {
   quizResults: QuizResult[];
   quizProgress: Record<string, QuizProgress>;
   termPoints: Record<string, TermPoints>;
-
-  studyNotesCompleted: Record<
-    string,
-    string[]
-  >;
+  studyNotesCompleted: Record<string, string[]>;
 
   setName: (name: string) => void;
   setAvatar: (avatar: string) => void;
   setGrade: (grade: string) => void;
-
   setSchoolName: (
     schoolName: string
   ) => void;
@@ -662,18 +647,14 @@ export const useSomaStore =
      *
      * This does NOT create a new SOMA HUB Code.
      */
-
     if (initialName) {
       void syncStudentToBackend({
         soma_hub_code:
           initialSomaHubCode,
-
         name:
           initialName,
-
         school_name:
           initialSchoolName ?? "",
-
         grade:
           initialGrade ?? "",
       });
@@ -720,10 +701,11 @@ export const useSomaStore =
        *
        * The server will supply the real paid balance.
        */
-      wallet: loadState<number>(
-        "soma_wallet",
-        0
-      ),
+      wallet:
+        loadState<number>(
+          "soma_wallet",
+          0
+        ),
 
       ksh:
         loadState<number | null>(
@@ -823,12 +805,9 @@ export const useSomaStore =
         void syncStudentToBackend({
           soma_hub_code:
             state.somaHubCode,
-
           name,
-
           school_name:
             state.schoolName ?? "",
-
           grade:
             state.grade ?? "",
         });
@@ -865,13 +844,10 @@ export const useSomaStore =
           void syncStudentToBackend({
             soma_hub_code:
               state.somaHubCode,
-
             name:
               state.name,
-
             school_name:
               state.schoolName ?? "",
-
             grade,
           });
         }
@@ -895,13 +871,10 @@ export const useSomaStore =
           void syncStudentToBackend({
             soma_hub_code:
               state.somaHubCode,
-
             name:
               state.name,
-
             school_name:
               schoolName,
-
             grade:
               state.grade ?? "",
           });
@@ -1035,7 +1008,6 @@ export const useSomaStore =
         const updatedTerm:
           TermPoints = {
             ...existing,
-
             [category]:
               currentCategoryValue +
               pointsToAdd,
@@ -1043,7 +1015,6 @@ export const useSomaStore =
 
         const termPoints = {
           ...state.termPoints,
-
           [termKey]:
             updatedTerm,
         };
@@ -1126,7 +1097,6 @@ export const useSomaStore =
         const studyNotesCompleted =
           {
             ...state.studyNotesCompleted,
-
             [termKey]:
               updatedCompletedForTerm,
           };
@@ -1322,7 +1292,7 @@ export const useSomaStore =
 
       /* =====================================================
          QUIZ RESULTS
-         
+
          IMPORTANT:
          Quiz activity still gives XP and learning/term points.
          It DOES NOT create SOMA Points or wallet money.
@@ -1332,7 +1302,6 @@ export const useSomaStore =
         result
       ) => {
         const state = get();
-
         const t = today();
 
         /* -----------------------------------------------
@@ -1373,7 +1342,7 @@ export const useSomaStore =
 
         /* -----------------------------------------------
            XP
-           
+
            Quiz results still earn XP.
            They do NOT earn paid SOMA Points.
            ----------------------------------------------- */
@@ -1404,7 +1373,6 @@ export const useSomaStore =
             ...result,
 
             xpEarned,
-
             coinsEarned,
 
             id: Math.random()
@@ -1756,7 +1724,6 @@ export const useSomaStore =
 
             [progress.materialId]: {
               ...progress,
-
               updatedAt:
                 new Date().toISOString(),
             },
@@ -1823,34 +1790,28 @@ export const useSomaStore =
 
         set({
           name: null,
-
           avatar: null,
-
           grade: null,
-
           schoolName: null,
 
           somaHubCode:
             generateSomaHubCode(),
 
           studyIntent: null,
-
           pathway: null,
-
           activeGrade: null,
 
           /*
            * No free starting balance after logout.
            */
-          wallet: 0,
 
+          wallet: 0,
           ksh: null,
 
           prices:
             DEFAULT_PRICES,
 
           subscription: null,
-
           xp: 0,
 
           streak: {
@@ -1858,24 +1819,64 @@ export const useSomaStore =
           },
 
           dailyGoal: 2,
-
           purchased: [],
-
           libraryHidden: [],
-
           transactions: [],
-
           quizResults: [],
-
           quizProgress: {},
-
           termPoints: {},
-
           studyNotesCompleted: {},
         });
       },
     };
   });
+
+/* =========================================================
+   HELPERS
+   ========================================================= */
+
+function today(): string {
+  const now = new Date();
+
+  const year =
+    now.getFullYear();
+
+  const month =
+    String(
+      now.getMonth() + 1
+    ).padStart(2, "0");
+
+  const day =
+    String(
+      now.getDate()
+    ).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function daysBetween(
+  from: string,
+  to: string
+): number {
+  const fromDate =
+    new Date(
+      `${from}T00:00:00`
+    );
+
+  const toDate =
+    new Date(
+      `${to}T00:00:00`
+    );
+
+  const difference =
+    toDate.getTime() -
+    fromDate.getTime();
+
+  return Math.round(
+    difference /
+      (1000 * 60 * 60 * 24)
+  );
+}
 
 /* =========================================================
    INITIAL STUDENT BACKEND SYNC
@@ -1889,30 +1890,40 @@ setTimeout(() => {
     return;
   }
 
-  void syncStudentToBackend({
-    soma_hub_code:
-      state.somaHubCode,
+  /*
+   * IMPORTANT:
+   * Register the student first.
+   *
+   * The performance endpoint needs the student to already
+   * exist in the backend before term points and quiz results
+   * are synchronized.
+   */
+  void (async () => {
+    await syncStudentToBackend({
+      soma_hub_code:
+        state.somaHubCode,
 
-    name:
-      state.name,
+      name:
+        state.name!,
 
-    school_name:
-      state.schoolName ?? "",
+      school_name:
+        state.schoolName ?? "",
 
-    grade:
-      state.grade ?? "",
-  });
+      grade:
+        state.grade ?? "",
+    });
 
-  void syncStudentPerformanceToBackend({
-    soma_hub_code:
-      state.somaHubCode,
+    await syncStudentPerformanceToBackend({
+      soma_hub_code:
+        state.somaHubCode,
 
-    term_points:
-      Object.values(
-        state.termPoints
-      ),
+      term_points:
+        Object.values(
+          state.termPoints
+        ),
 
-    quiz_results:
-      state.quizResults,
-  });
+      quiz_results:
+        state.quizResults,
+    });
+  })();
 }, 0);
