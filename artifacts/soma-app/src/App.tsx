@@ -51,14 +51,29 @@ function App() {
     useState(false);
 
   /*
+   * Hidden developer access.
+   *
+   * Open:
+   * https://somaahub.co.ke/?developer
+   *
+   * This does not show any developer button
+   * on the normal student interface.
+   */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+
+    if (params.has("developer")) {
+      setCurrentPage("developer-login");
+    }
+  }, []);
+
+  /*
    * Load coins, KSh and unlocks from the server, and send any
    * quiz rewards earned offline once the connection is back.
    */
   const onDashboard = currentPage === "dashboard";
 
   useEffect(() => {
-    // Wait until signup is finished: the server can't register a
-    // student without their school and grade.
     if (!name || !onDashboard) return;
 
     const sync = () => {
@@ -79,6 +94,13 @@ function App() {
    */
   useEffect(() => {
     if (developerLoggedIn) {
+      return;
+    }
+
+    if (
+      currentPage === "developer-login" ||
+      currentPage === "developer-dashboard"
+    ) {
       return;
     }
 
@@ -115,6 +137,7 @@ function App() {
     studyIntent,
     avatar,
     developerLoggedIn,
+    currentPage,
   ]);
 
   /*
@@ -196,8 +219,7 @@ function App() {
   }
 
   /*
-   * Developer pages must be shown independently from
-   * the normal student onboarding flow.
+   * Developer login page.
    */
   if (currentPage === "developer-login") {
     return (
@@ -211,6 +233,9 @@ function App() {
     );
   }
 
+  /*
+   * Developer dashboard.
+   */
   if (currentPage === "developer-dashboard") {
     return (
       <>
@@ -226,8 +251,7 @@ function App() {
   /*
    * Welcome page.
    *
-   * The developer entry is intentionally kept separate
-   * from the normal student onboarding flow.
+   * No developer button is displayed here.
    */
   if (currentPage === "welcome") {
     return (
@@ -335,7 +359,6 @@ function App() {
       )}
 
       <Toaster position="top-center" />
-      {/* The dashboard and wallet modal use the use-toast hook. */}
       <HookToaster />
     </>
   );
