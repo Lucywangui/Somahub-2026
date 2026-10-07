@@ -2442,7 +2442,46 @@ def payment_status(session_id):
             "balance": balance,
         })
 
+    # ========================================================
+    # IMPORTANT FIX:
+    #
+    # A webhook can complete the payment before the frontend
+    # polls payment-status.
+    #
+    # In that case the payment session is already COMPLETED.
+    # We MUST still run the existing idempotent fulfilment
+    # function so the frontend receives the actual purpose
+    # result instead of purpose_result: null.
+    #
+    # This does NOT double-charge the wallet because
+    # coins.py already protects the fulfilment operation.
+    # ========================================================
+
     if local_status == "COMPLETED":
+        try:
+            fulfil_result = (
+                coins_bp.fulfil_payment_purpose(
+                    payment_session["session_id"]
+                )
+            )
+
+        except Exception:
+            app.logger.exception(
+                "Payment already completed but "
+                "purpose fulfilment failed for session %s",
+                payment_session["session_id"],
+            )
+
+            return jsonify({
+                "success": False,
+                "paymentCredited": True,
+                "error": (
+                    "Payment was completed, but the "
+                    "requested material could not be "
+                    "confirmed."
+                ),
+            }), 500
+
         balance = calculate_wallet_balance(
             payment_session["soma_hub_code"]
         )
@@ -2452,9 +2491,10 @@ def payment_status(session_id):
             "session_id": session_id,
             "status": "completed",
             "wallet_balance": balance,
-            "purpose_result": None,
+            "purpose_result": fulfil_result,
             "sessionId": session_id,
             "balance": balance,
+            "fulfilment": fulfil_result,
         })
 
     try:
