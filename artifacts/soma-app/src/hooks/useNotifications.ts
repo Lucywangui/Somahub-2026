@@ -1,97 +1,247 @@
-import { useSomaStore } from "@/lib/storage";
+﻿import { Capacitor } from "@capacitor/core";
+import {
+  LocalNotifications,
+  type LocalNotificationSchema,
+} from "@capacitor/local-notifications";
+import {
+  AndroidSettings,
+  IOSSettings,
+  NativeSettings,
+} from "capacitor-native-settings";
 
-const STORAGE_KEY_ENABLED = "soma_notif_enabled";
-const STORAGE_KEY_LAST = "soma_notif_last";
+const ENABLED_KEY = "somaHubNotificationsEnabled";
+const LAST_REMINDER_KEY = "somaHubLastDailyReminder";
+const DAILY_REMINDER_ID = 1800;
+const TEST_NOTIFICATION_ID = 1801;
 
-const MASCOTS = ["🦁", "🐘", "🦉", "🐯", "🦒"];
-const MASCOT_NAMES = ["Leo", "Ellie", "Prof Owl", "Cheetah", "Gigi"];
+export const isNotificationsEnabled =
+  typeof localStorage !== "undefined" &&
+  localStorage.getItem(ENABLED_KEY) === "true";
 
-const ALL_SUBJECTS = [
-  "Mathematics", "English", "Kiswahili", "Science", "Biology",
-  "Chemistry", "Physics", "History", "Agriculture", "Social Studies",
-];
+export function setNotificationsEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(ENABLED_KEY, String(enabled));
+  } catch (error) {
+    console.error("Could not save notification preference:", error);
+  }
 
-const PARENT_MESSAGES = [
-  "Your child's future is built today — 5 shillings unlocks a world of knowledge! 🌟",
-  "Every great Kenyan leader started with one quiz. Top up now and let your child shine! ✨",
-  "Smart parents invest in smart kids. Keep the learning going for only KSh 5! 🎓",
-  "Knowledge is the best gift. Recharge your child's wallet and watch them soar! 🚀",
-  "Just KSh 5 for a quiz that could change everything. Don't let learning stop today! 💪",
-  "Your child is ready to learn — are you ready to invest? Top up now! 📚",
-  "Champions are made through daily practice. Fund today's quiz for only KSh 5! 🏆",
-  "In Kenya, education opens every door. Keep that door wide open for your child! 🇰🇪",
-];
-
-export function isNotificationsEnabled(): boolean {
-  return localStorage.getItem(STORAGE_KEY_ENABLED) === "true";
+  if (!enabled && Capacitor.isNativePlatform()) {
+    void LocalNotifications.cancel({
+      notifications: [
+        { id: DAILY_REMINDER_ID },
+        { id: TEST_NOTIFICATION_ID },
+      ],
+    }).catch((error) => {
+      console.error("Could not cancel notifications:", error);
+    });
+  }
 }
 
-export function setNotificationsEnabled(val: boolean): void {
-  localStorage.setItem(STORAGE_KEY_ENABLED, val ? "true" : "false");
+export async function openNotificationSettings(): Promise<void> {
+  try {
+    if (Capacitor.getPlatform() === "android") {
+      await NativeSettings.openAndroid({
+        option: AndroidSettings.AppNotification,
+      });
+      return;
+    }
+
+    if (Capacitor.getPlatform() === "ios") {
+      await NativeSettings.openIOS({
+        option: IOSSettings.AppNotification,
+      });
+      return;
+    }
+
+    window.alert(
+      "Open your device or browser settings and allow notifications for SOMA HUB.",
+    );
+  } catch (error) {
+    console.error("Could not open notification settings:", error);
+  }
 }
 
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+async function hasNotificationPermission(): Promise<boolean> {
+  if (!Capacitor.isNativePlatform()) {
+    return (
+      typeof Notification !== "undefined" &&
+      Notification.permission === "granted"
+    );
+  }
+
+  try {
+    const permission = await LocalNotifications.checkPermissions();
+    return permission.display === "granted";
+  } catch (error) {
+    console.error("Could not check notification permission:", error);
+    return false;
+  }
 }
 
-function pickTwo<T>(arr: T[]): [T, T] {
-  const copy = [...arr];
-  const a = copy.splice(Math.floor(Math.random() * copy.length), 1)[0];
-  const b = copy[Math.floor(Math.random() * copy.length)];
-  return [a, b];
+async function scheduleDailyReminder(name?: string): Promise<void> {
+  if (!Capacitor.isNativePlatform()) return;
+  if (!(await hasNotificationPermission())) return;
+
+  const learner = name?.trim();
+  const body = learner
+    ? `${learner}, it's time to practise and keep your streak alive! 💛`
+    : "It's time to practise and keep your streak alive! 💛";
+
+  const notification: LocalNotificationSchema = {
+    id: DAILY_REMINDER_ID,
+    title: "🐦 Time to learn!",
+    body,
+    schedule: {
+      on: { hour: 18, minute: 0 },
+      repeats: true,
+      allowWhileIdle: true,
+    },
+    extra: { type: "daily-study-reminder" },
+  };
+
+  try {
+    const pending = await LocalNotifications.getPending();
+    const exists = pending.notifications.some(
+      (item) => item.id === DAILY_REMINDER_ID,
+    );
+
+    if (!exists) {
+      await LocalNotifications.schedule({
+        notifications: [notification],
+      });
+    }
+  } catch (error) {
+    console.error("Could not schedule daily reminder:", error);
+  }
 }
 
 export async function requestAndEnableNotifications(): Promise<boolean> {
-  if (!("Notification" in window)) return false;
-  if (Notification.permission === "granted") {
+  try {
+    if (!Capacitor.isNativePlatform()) {
+      if (typeof Notification === "undefined") return false;
+
+      let permission = Notification.permission;
+      if (permission === "default") {
+        permission = await Notification.requestPermission();
+      }
+
+      if (permission !== "granted") {
+        await openNotificationSettings();
+        return false;
+      }
+
+      setNotificationsEnabled(true);
+      return true;
+    }
+
+    let permission = await LocalNotifications.checkPermissions();
+
+    if (permission.display !== "granted") {
+      permission = await LocalNotifications.requestPermissions();
+    }
+
+    if (permission.display !== "granted") {
+      await openNotificationSettings();
+      return false;
+    }
+
     setNotificationsEnabled(true);
     return true;
+  } catch (error) {
+    console.error("Could not enable notifications:", error);
+    return false;
   }
-  const perm = await Notification.requestPermission();
-  if (perm === "granted") {
-    setNotificationsEnabled(true);
-    return true;
+}
+
+export async function showTestNotification(name?: string): Promise<void> {
+  const learner = name?.trim();
+
+  if (!Capacitor.isNativePlatform()) {
+    if (
+      typeof Notification !== "undefined" &&
+      Notification.permission === "granted"
+    ) {
+      new Notification("🐦 SOMA HUB", {
+        body: learner
+          ? `Hi ${learner}! Your study reminders are on. 💛`
+          : "Your study reminders are on. 💛",
+      });
+    }
+    return;
   }
-  return false;
+
+  if (!(await hasNotificationPermission())) return;
+
+  try {
+    await LocalNotifications.cancel({
+      notifications: [{ id: TEST_NOTIFICATION_ID }],
+    });
+
+    await LocalNotifications.schedule({
+      notifications: [
+        {
+          id: TEST_NOTIFICATION_ID,
+          title: "🐦 SOMA HUB",
+          body: learner
+            ? `Hi ${learner}! Your study reminders are on. 💛`
+            : "Your study reminders are on. 💛",
+          schedule: {
+            at: new Date(Date.now() + 2000),
+            allowWhileIdle: true,
+          },
+        },
+      ],
+    });
+  } catch (error) {
+    console.error("Could not show test notification:", error);
+  }
 }
 
-export function showDailyReminder(childName?: string): void {
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
+export async function checkAndShowDailyReminder(
+  name?: string,
+): Promise<void> {
+  let enabled = false;
 
-  const mascotIdx = Math.floor(Math.random() * MASCOTS.length);
-  const mascot = MASCOTS[mascotIdx];
-  const mascotName = MASCOT_NAMES[mascotIdx];
-  const [subA, subB] = pickTwo(ALL_SUBJECTS);
-  const message = pick(PARENT_MESSAGES);
+  try {
+    enabled = localStorage.getItem(ENABLED_KEY) === "true";
+  } catch (error) {
+    console.error("Could not read notification preference:", error);
+  }
 
-  const name = childName ? childName : "your child";
+  if (!enabled) return;
 
-  new Notification(`${mascot} ${mascotName} says: Time to learn!`, {
-    body: `${name} has ${subA} and ${subB} waiting today!\n${message}`,
-    icon: "/vite.svg",
-    badge: "/vite.svg",
-    tag: "soma-daily",
-    requireInteraction: false,
-  });
+  if (Capacitor.isNativePlatform()) {
+    await scheduleDailyReminder(name);
+    return;
+  }
 
-  localStorage.setItem(STORAGE_KEY_LAST, Date.now().toString());
-}
+  if (
+    typeof Notification !== "undefined" &&
+    Notification.permission === "granted"
+  ) {
+    const today = new Date().toLocaleDateString();
+    let lastReminder: string | null = null;
 
-export function showTestNotification(childName?: string): void {
-  showDailyReminder(childName);
-}
+    try {
+      lastReminder = localStorage.getItem(LAST_REMINDER_KEY);
+    } catch {
+      return;
+    }
 
-export function checkAndShowDailyReminder(childName?: string): void {
-  if (!isNotificationsEnabled()) return;
-  if (Notification.permission !== "granted") return;
+    if (lastReminder !== today) {
+      const learner = name?.trim();
 
-  const lastStr = localStorage.getItem(STORAGE_KEY_LAST);
-  const last = lastStr ? parseInt(lastStr, 10) : 0;
-  const twentyFourHours = 24 * 60 * 60 * 1000;
-  const now = Date.now();
+      new Notification("🐦 Time to learn!", {
+        body: learner
+          ? `${learner}, practise today and keep your streak alive! 💛`
+          : "Practise today and keep your streak alive! 💛",
+      });
 
-  if (now - last >= twentyFourHours) {
-    // Small delay so it doesn't fire immediately on mount
-    setTimeout(() => showDailyReminder(childName), 3000);
+      try {
+        localStorage.setItem(LAST_REMINDER_KEY, today);
+      } catch (error) {
+        console.error("Could not save reminder date:", error);
+      }
+    }
   }
 }

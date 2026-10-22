@@ -1,4 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
+import { Capacitor } from "@capacitor/core";
+import { LocalNotifications } from "@capacitor/local-notifications";
 import { motion } from "framer-motion";
 import {
   useSomaStore,
@@ -42,6 +44,7 @@ import {
   checkAndShowDailyReminder,
   isNotificationsEnabled,
   setNotificationsEnabled,
+  openNotificationSettings,
 } from "@/hooks/useNotifications";
 import {
   PieChart,
@@ -154,9 +157,70 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
   const [gradeMenuOpen, setGradeMenuOpen] = useState(false);
   const [notifsEnabled, setNotifsEnabled] =
     useState(isNotificationsEnabled);
+  const [showNotificationWelcome, setShowNotificationWelcome] =
+    useState(false);
+
+  // Invite the learner to enable notifications at most once per local day.
+  useEffect(() => {
+    try {
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const alreadyEnabled =
+        localStorage.getItem("somaHubNotificationsEnabled") === "true";
+      const lastPromptDate =
+        localStorage.getItem("somaHubNotificationPromptDate");
+
+      if (!alreadyEnabled && lastPromptDate !== today) {
+        setShowNotificationWelcome(true);
+        localStorage.setItem("somaHubNotificationPromptDate", today);
+      }
+    } catch (error) {
+      console.error("Could not check notification welcome prompt:", error);
+    }
+  }, [name]);
 
   useEffect(() => {
-    checkAndShowDailyReminder(name ?? undefined);
+    void checkAndShowDailyReminder(name ?? undefined);
+  }, [name]);
+
+  // Synchronise permission after returning from the operating system settings.
+  useEffect(() => {
+    const syncNotificationPermission = async () => {
+      try {
+        let granted = false;
+
+        if (Capacitor.isNativePlatform()) {
+          const permission =
+            await LocalNotifications.checkPermissions();
+          granted = permission.display === "granted";
+        } else if (typeof Notification !== "undefined") {
+          granted = Notification.permission === "granted";
+        }
+
+        setNotificationsEnabled(granted);
+        setNotifsEnabled(granted);
+
+        if (granted) {
+          await checkAndShowDailyReminder(name ?? undefined);
+        }
+      } catch (error) {
+        console.error("Could not sync notification permission:", error);
+      }
+    };
+
+    const handleReturnToApp = () => {
+      if (document.visibilityState === "visible") {
+        void syncNotificationPermission();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleReturnToApp);
+    window.addEventListener("focus", handleReturnToApp);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleReturnToApp);
+      window.removeEventListener("focus", handleReturnToApp);
+    };
   }, [name]);
 
   // Fallback keeps derived hooks safe during the brief render after logout,
@@ -399,6 +463,22 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
             "Allow notifications in browser settings.",
         });
       }
+    }
+  };
+
+  const handleEnableWelcomeNotifications = async () => {
+    setShowNotificationWelcome(false);
+
+    try {
+      await openNotificationSettings();
+    } catch (error) {
+      console.error("Could not open notification settings:", error);
+      toast({
+        variant: "destructive",
+        title: "Couldn't open notification settings",
+        description:
+          "Open your phone's Settings, find SOMA HUB, and allow notifications.",
+      });
     }
   };
 
@@ -1195,7 +1275,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
           </div>
         )}
 
-        {/* ── LIBRARY ── */}
+                {/* ── LIBRARY ── */}
         {activeTab === "library" && (
           <div className="max-w-7xl mx-auto px-4 pt-5">
             <h2 className="text-xl font-extrabold mb-4">
@@ -1205,8 +1285,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
               </span>
             </h2>
 
-            {purchasedMaterials.length ===
-              0 ? (
+            {purchasedMaterials.length === 0 ? (
               <div className="text-center py-24 rounded-3xl border-2 border-dashed border-muted bg-muted/20">
                 <div className="text-6xl mb-4">
                   📖
@@ -1232,29 +1311,25 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                {purchasedMaterials.map(
-                  (m) => (
-                    <MaterialCard
-                      key={m.id}
-                      material={m}
-                      isPurchased
-                      onBuy={() => { }}
-                      onOpen={() =>
-                        onOpenViewer(m.id)
-                      }
-                      onDelete={() => {
-                        removePurchased(
-                          m.id,
-                        );
+                {purchasedMaterials.map((m) => (
+                  <MaterialCard
+                    key={m.id}
+                    material={m}
+                    isPurchased
+                    onBuy={() => {}}
+                    onOpen={() =>
+                      onOpenViewer(m.id)
+                    }
+                    onDelete={() => {
+                      removePurchased(m.id);
 
-                        toast({
-                          title: "Removed",
-                          description: `${m.title} removed.`,
-                        });
-                      }}
-                    />
-                  ),
-                )}
+                      toast({
+                        title: "Removed",
+                        description: `${m.title} removed.`,
+                      });
+                    }}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -1293,14 +1368,12 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
               </h2>
 
               <p className="text-sm mt-1 opacity-70">
-                {gradeDisplayName(homeGrade)} ·
-                Level {level.level}
+                {gradeDisplayName(homeGrade)} · Level {level.level}
               </p>
 
               {/* School name */}
               <p className="text-sm mt-1 opacity-80">
-                {schoolName ||
-                  "School not added"}
+                {schoolName || "School not added"}
               </p>
 
               {/* SOMA HUB student code */}
@@ -1317,9 +1390,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                   }}
                 >
                   🔥 {streak.count} day
-                  {streak.count !== 1
-                    ? "s"
-                    : ""}
+                  {streak.count !== 1 ? "s" : ""}
                 </span>
 
                 <span
@@ -1353,9 +1424,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
               >
                 <div className="flex items-center justify-between">
                   <span className="text-xs opacity-70">
-                    Term{" "}
-                    {currentSchoolTerm.term} ·{" "}
-                    {currentSchoolTerm.year}
+                    Term {currentSchoolTerm.term} · {currentSchoolTerm.year}
                   </span>
 
                   <span className="text-lg font-extrabold">
@@ -1385,31 +1454,18 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                 className="w-full rounded-2xl bg-card border shadow-sm p-4 flex items-center gap-3 text-left hover:border-primary/40"
               >
                 <span className="text-2xl">
-                  {
-                    INTENT_LABELS[
-                      studyIntent
-                    ].emoji
-                  }
+                  {INTENT_LABELS[studyIntent].emoji}
                 </span>
 
                 <span className="min-w-0">
                   <span className="block font-bold text-sm">
-                    {
-                      INTENT_LABELS[
-                        studyIntent
-                      ].title
-                    }
+                    {INTENT_LABELS[studyIntent].title}
                   </span>
 
                   <span className="block text-xs text-muted-foreground">
-                    {resolveGrade(homeGrade)
-                      .band === "senior" &&
-                      pathwayById(pathway)
-                      ? `${pathwayById(pathway)!
-                        .emoji
-                      } ${pathwayById(pathway)!
-                        .title
-                      } pathway · tap to change`
+                    {resolveGrade(homeGrade).band === "senior" &&
+                    pathwayById(pathway)
+                      ? `${pathwayById(pathway)!.emoji} ${pathwayById(pathway)!.title} pathway · tap to change`
                       : "Tap to change class or goal"}
                   </span>
                 </span>
@@ -1423,20 +1479,14 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                   Topic mastery
                 </h3>
 
-                {[
-                  ...mastery,
-                ]
+                {[...mastery]
                   .sort(
                     (a, b) =>
-                      b.mastery -
-                      a.mastery,
+                      b.mastery - a.mastery,
                   )
                   .slice(0, 8)
                   .map((m) => {
-                    const b =
-                      masteryBand(
-                        m.mastery,
-                      );
+                    const b = masteryBand(m.mastery);
 
                     return (
                       <div key={m.key}>
@@ -1463,8 +1513,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                             className="h-full rounded-full"
                             style={{
                               width: `${m.mastery}%`,
-                              background:
-                                b.color,
+                              background: b.color,
                             }}
                           />
                         </div>
@@ -1496,28 +1545,23 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                     paddingAngle={3}
                     dataKey="value"
                   >
-                    {pieData.map(
-                      (_, i) => (
-                        <Cell
-                          key={i}
-                          fill={
-                            CHART_COLORS[
-                            i %
-                            CHART_COLORS.length
-                            ]
-                          }
-                        />
-                      ),
-                    )}
+                    {pieData.map((_, i) => (
+                      <Cell
+                        key={i}
+                        fill={
+                          CHART_COLORS[
+                            i % CHART_COLORS.length
+                          ]
+                        }
+                      />
+                    ))}
                   </Pie>
 
                   <Tooltip
-                    formatter={(
-                      v: number,
-                    ) => [
-                        `${v} materials`,
-                        "",
-                      ]}
+                    formatter={(v: number) => [
+                      `${v} materials`,
+                      "",
+                    ]}
                     contentStyle={{
                       borderRadius: 12,
                       border: "none",
@@ -1533,10 +1577,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                         }}
                       >
                         {v.length > 12
-                          ? v.slice(
-                            0,
-                            12,
-                          ) + "…"
+                          ? v.slice(0, 12) + "…"
                           : v}
                       </span>
                     )}
@@ -1576,16 +1617,19 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                 </div>
 
                 <button
-                  onClick={
-                    handleToggleNotifications
-                  }
+                  onClick={handleToggleNotifications}
                   className="relative w-12 h-6 rounded-full transition-colors"
                   style={{
-                    background:
-                      notifsEnabled
-                        ? "#e67e22"
-                        : "#cbd5e1",
+                    background: notifsEnabled
+                      ? "#e67e22"
+                      : "#cbd5e1",
                   }}
+                  aria-label={
+                    notifsEnabled
+                      ? "Turn off notifications"
+                      : "Turn on notifications"
+                  }
+                  aria-pressed={notifsEnabled}
                 >
                   <span
                     className="absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform"
@@ -1639,8 +1683,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
             label,
             icon: Icon,
           }) => {
-            const isActive =
-              activeTab === id;
+            const isActive = activeTab === id;
 
             return (
               <button
@@ -1651,9 +1694,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                     ? "#1a3a5c"
                     : "#999",
                 }}
-                onClick={() =>
-                  setActiveTab(id)
-                }
+                onClick={() => setActiveTab(id)}
                 data-testid={`tab-${id}`}
               >
                 <Icon
@@ -1663,9 +1704,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                       ? "scale(1.15)"
                       : "scale(1)",
                   }}
-                  strokeWidth={
-                    isActive ? 2.5 : 1.8
-                  }
+                  strokeWidth={isActive ? 2.5 : 1.8}
                 />
 
                 <span className="text-xs font-semibold">
@@ -1677,8 +1716,7 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
                     layoutId="tab-indicator"
                     className="absolute bottom-0 h-0.5 w-10 rounded-full"
                     style={{
-                      background:
-                        "#e67e22",
+                      background: "#e67e22",
                     }}
                   />
                 )}
@@ -1687,6 +1725,98 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
           },
         )}
       </nav>
+
+      {/* Notification welcome popup */}
+      {showNotificationWelcome && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-5 py-6"
+          role="presentation"
+        >
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notification-welcome-title"
+            aria-describedby="notification-welcome-description"
+            className="w-full max-w-sm overflow-hidden rounded-3xl bg-white shadow-2xl"
+            initial={{
+              opacity: 0,
+              scale: 0.92,
+              y: 16,
+            }}
+            animate={{
+              opacity: 1,
+              scale: 1,
+              y: 0,
+            }}
+            transition={{
+              duration: 0.22,
+            }}
+          >
+            <div
+              className="px-6 pt-7 pb-6 text-center"
+              style={{
+                background:
+                  "linear-gradient(145deg, #fff7ed, #fff1f2)",
+              }}
+            >
+              <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-white shadow-sm">
+                <span className="text-5xl" aria-hidden="true">
+                  🐦
+                </span>
+              </div>
+
+              <h2
+                id="notification-welcome-title"
+                className="text-2xl font-extrabold tracking-tight"
+                style={{
+                  color: "#1a3a5c",
+                }}
+              >
+                Hi, learner!
+              </h2>
+
+              <p
+                id="notification-welcome-description"
+                className="mt-3 text-sm leading-relaxed text-slate-600"
+              >
+                Turn on notifications for daily study reminders. 💛
+              </p>
+
+              <div className="mt-5 flex items-center justify-center gap-2 text-xs font-medium text-slate-500">
+                <span aria-hidden="true">📚</span>
+                <span>Little reminders, brighter learning.</span>
+              </div>
+            </div>
+
+            <div className="space-y-3 p-5">
+              <Button
+                className="w-full rounded-2xl py-6 text-sm font-bold shadow-sm"
+                style={{
+                  background: "#e67e22",
+                  color: "#ffffff",
+                }}
+                onClick={() =>
+                  void handleEnableWelcomeNotifications()
+                }
+              >
+                <Bell className="mr-2 h-4 w-4" />
+                Enable Notifications
+              </Button>
+
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full rounded-2xl py-5 font-semibold text-slate-500 hover:bg-slate-50"
+                onClick={() =>
+                  setShowNotificationWelcome(false)
+                }
+              >
+                Maybe later
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       <UnlockDialog
         prompt={unlockPrompt}
@@ -1700,7 +1830,10 @@ export function DashboardPage({ onOpenViewer, onChangeGrade, onLogout }: Props) 
         }
         onUnlocked={(id) => {
           setUnlockPrompt(null);
-          toast({ title: "Opened", description: "Enjoy your material." });
+          toast({
+            title: "Opened",
+            description: "Enjoy your material.",
+          });
           onOpenViewer(id);
         }}
         onTopUp={() => {
