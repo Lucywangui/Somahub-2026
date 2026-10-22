@@ -4,6 +4,7 @@ import type { Question } from "@/data/questions";
 import type { Pathway } from "@/data/curriculum";
 
 /** A quiz the learner started but has not finished — lets them resume later. */
+
 export interface QuizProgress {
   materialId: string;
   type: "topical" | "exam";
@@ -24,6 +25,7 @@ export interface Transaction {
 }
 
 /** Balances and unlocks as the server reports them. */
+
 export interface ServerAccount {
   coins: number;
   ksh: number;
@@ -58,6 +60,7 @@ const DEFAULT_PRICES: Prices = {
 };
 
 /** Material IDs start with their grade key, e.g. cbc-7-english-... */
+
 export function subscriptionCovers(
   subscription: Subscription | null,
   materialId: string
@@ -141,6 +144,7 @@ export const CONSISTENCY_TERM_POINTS = 2;
  * Every 5 percentage points of improvement
  * in quiz/exam performance earns 1 progress point.
  */
+
 export const PROGRESS_PERCENTAGE_STEP = 5;
 export const PROGRESS_POINTS_PER_STEP = 1;
 export const MAX_TERM_POINTS = 100;
@@ -255,14 +259,16 @@ function getOrCreateSomaHubCode(): string {
    BACKEND SYNCHRONIZATION
    ========================================================= */
 
+/**
+ * IMPORTANT:
+ * The app and website both use the same live SOMA HUB backend.
+ *
+ * Do NOT use localhost here because an Android APK's
+ * 127.0.0.1 refers to the Android device itself.
+ */
+
 export const SOMA_API_BASE_URL =
-  (
-    import.meta.env
-      .VITE_API_BASE_URL as
-      | string
-      | undefined
-  )?.replace(/\/$/, "") ||
-  "http://127.0.0.1:5000";
+  "https://somahub-2026.onrender.com";
 
 export async function syncStudentToBackend(data: {
   soma_hub_code: string;
@@ -368,6 +374,7 @@ async function syncStudentPerformanceToBackend(
          * These top-level keys match the backend performance API.
          * The calculations above are not changed.
          */
+
         body: JSON.stringify({
           somaHubCode:
             data.soma_hub_code,
@@ -377,16 +384,22 @@ async function syncStudentPerformanceToBackend(
               (term) => ({
                 termKey:
                   `${term.year}-T${term.term}`,
+
                 studyNotes:
                   term.studyNotes,
+
                 topicalQuizzes:
                   term.topicalQuizzes,
+
                 exams:
                   term.exams,
+
                 consistency:
                   term.consistency,
+
                 progress:
                   term.progress,
+
                 totalPoints:
                   getTermPointsTotal(term),
               })
@@ -397,20 +410,28 @@ async function syncStudentPerformanceToBackend(
               (result) => ({
                 materialId:
                   result.materialId,
+
                 materialTitle:
                   result.materialTitle,
+
                 subject:
                   result.subject,
+
                 gradeKey:
                   result.gradeKey,
+
                 type:
                   result.type,
+
                 score:
                   result.score,
+
                 total:
                   result.total,
+
                 percentage:
                   result.percentage,
+
                 date:
                   result.date,
               })
@@ -467,9 +488,11 @@ interface SomaState {
    * These are now exactly equal to the real-money wallet
    * balance reported by the server.
    */
+
   wallet: number;
 
   /** Real wallet balance in KSh. */
+
   ksh: number | null;
 
   prices: Prices;
@@ -479,9 +502,11 @@ interface SomaState {
   dailyGoal: number;
 
   /** Unlocked materials shown in the library. */
+
   purchased: string[];
 
   /** Unlocked materials hidden from the library. */
+
   libraryHidden: string[];
 
   transactions: Transaction[];
@@ -491,8 +516,11 @@ interface SomaState {
   studyNotesCompleted: Record<string, string[]>;
 
   setName: (name: string) => void;
+
   setAvatar: (avatar: string) => void;
+
   setGrade: (grade: string) => void;
+
   setSchoolName: (
     schoolName: string
   ) => void;
@@ -647,14 +675,18 @@ export const useSomaStore =
      *
      * This does NOT create a new SOMA HUB Code.
      */
+
     if (initialName) {
       void syncStudentToBackend({
         soma_hub_code:
           initialSomaHubCode,
+
         name:
           initialName,
+
         school_name:
           initialSchoolName ?? "",
+
         grade:
           initialGrade ?? "",
       });
@@ -701,6 +733,7 @@ export const useSomaStore =
        *
        * The server will supply the real paid balance.
        */
+
       wallet:
         loadState<number>(
           "soma_wallet",
@@ -805,9 +838,12 @@ export const useSomaStore =
         void syncStudentToBackend({
           soma_hub_code:
             state.somaHubCode,
+
           name,
+
           school_name:
             state.schoolName ?? "",
+
           grade:
             state.grade ?? "",
         });
@@ -844,10 +880,13 @@ export const useSomaStore =
           void syncStudentToBackend({
             soma_hub_code:
               state.somaHubCode,
+
             name:
               state.name,
+
             school_name:
               state.schoolName ?? "",
+
             grade,
           });
         }
@@ -871,10 +910,13 @@ export const useSomaStore =
           void syncStudentToBackend({
             soma_hub_code:
               state.somaHubCode,
+
             name:
               state.name,
+
             school_name:
               schoolName,
+
             grade:
               state.grade ?? "",
           });
@@ -1008,6 +1050,7 @@ export const useSomaStore =
         const updatedTerm:
           TermPoints = {
             ...existing,
+
             [category]:
               currentCategoryValue +
               pointsToAdd,
@@ -1015,6 +1058,7 @@ export const useSomaStore =
 
         const termPoints = {
           ...state.termPoints,
+
           [termKey]:
             updatedTerm,
         };
@@ -1097,6 +1141,7 @@ export const useSomaStore =
         const studyNotesCompleted =
           {
             ...state.studyNotesCompleted,
+
             [termKey]:
               updatedCompletedForTerm,
           };
@@ -1302,6 +1347,7 @@ export const useSomaStore =
         result
       ) => {
         const state = get();
+
         const t = today();
 
         /* -----------------------------------------------
@@ -1342,7 +1388,6 @@ export const useSomaStore =
 
         /* -----------------------------------------------
            XP
-
            Quiz results still earn XP.
            They do NOT earn paid SOMA Points.
            ----------------------------------------------- */
@@ -1466,8 +1511,10 @@ export const useSomaStore =
             0,
             Math.min(
               requestedPoints,
+
               categoryLimit -
                 currentCategory,
+
               availableOverall
             )
           );
@@ -1724,6 +1771,7 @@ export const useSomaStore =
 
             [progress.materialId]: {
               ...progress,
+
               updatedAt:
                 new Date().toISOString(),
             },
@@ -1790,15 +1838,20 @@ export const useSomaStore =
 
         set({
           name: null,
+
           avatar: null,
+
           grade: null,
+
           schoolName: null,
 
           somaHubCode:
             generateSomaHubCode(),
 
           studyIntent: null,
+
           pathway: null,
+
           activeGrade: null,
 
           /*
@@ -1806,12 +1859,14 @@ export const useSomaStore =
            */
 
           wallet: 0,
+
           ksh: null,
 
           prices:
             DEFAULT_PRICES,
 
           subscription: null,
+
           xp: 0,
 
           streak: {
@@ -1819,12 +1874,19 @@ export const useSomaStore =
           },
 
           dailyGoal: 2,
+
           purchased: [],
+
           libraryHidden: [],
+
           transactions: [],
+
           quizResults: [],
+
           quizProgress: {},
+
           termPoints: {},
+
           studyNotesCompleted: {},
         });
       },
@@ -1898,6 +1960,7 @@ setTimeout(() => {
    * exist in the backend before term points and quiz results
    * are synchronized.
    */
+
   void (async () => {
     await syncStudentToBackend({
       soma_hub_code:

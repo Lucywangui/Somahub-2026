@@ -975,33 +975,21 @@ export function TopicalViewer({
           >
             {hasChecked &&
               (
-                parseInt(
-                  selectedOption
-                ) ===
-                  currentQ.correct
+                parseInt(selectedOption) === currentQ.correct
                   ? (
-                    <span
-                      className="
-                        text-green-600
-                      "
-                    >
-                      ✅ CORRECT!
-                    </span>
+                    <div className="flex flex-col items-center gap-1 text-green-600">
+                      <span className="text-4xl">🎉🥳</span>
+                      <span className="font-extrabold">AMAZING! YOU GOT IT RIGHT! 🎉</span>
+                    </div>
                   )
                   : (
-                    <span
-                      className="
-                        text-red-600
-                        text-base
-                      "
-                    >
-                      ❌ Answer:{" "}
-                      {
-                        currentQ.options[
-                          currentQ.correct
-                        ]
-                      }
-                    </span>
+                    <div className="flex flex-col items-center gap-1 text-red-600">
+                      <span className="text-4xl">😭😢</span>
+                      <span className="font-extrabold">OOPS! KEEP TRYING! 💪</span>
+                      <span className="text-sm font-medium">
+                        Correct answer: {currentQ.options[currentQ.correct]}
+                      </span>
+                    </div>
                   )
               )}
           </div>

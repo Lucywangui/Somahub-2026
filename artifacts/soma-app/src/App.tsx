@@ -40,13 +40,6 @@ function App() {
     logout,
   } = useSomaStore();
 
-  /*
-   * Start directly on the developer login page when
-   * ?developer is present in the URL.
-   *
-   * This is initialized before the normal student
-   * onboarding effect runs, so it cannot be overwritten.
-   */
   const [currentPage, setCurrentPage] = useState<PageState>(() => {
     const params = new URLSearchParams(window.location.search);
 
@@ -63,9 +56,6 @@ function App() {
   const [developerLoggedIn, setDeveloperLoggedIn] =
     useState(false);
 
-  /*
-   * Load the student's account when the dashboard is open.
-   */
   const onDashboard = currentPage === "dashboard";
 
   useEffect(() => {
@@ -85,9 +75,12 @@ function App() {
   }, [name, onDashboard]);
 
   /*
-   * Check the normal student onboarding state.
+   * Resume onboarding only from saved student data.
    *
-   * Developer pages are completely excluded from this logic.
+   * IMPORTANT:
+   * Do not use this effect to control manual page navigation.
+   * Otherwise Welcome -> Name immediately jumps back to Welcome
+   * because the name has not been entered yet.
    */
   useEffect(() => {
     if (
@@ -98,32 +91,33 @@ function App() {
       return;
     }
 
-    if (!name) {
-      setCurrentPage("welcome");
+    if (currentPage !== "welcome") {
       return;
     }
 
-    if (!grade) {
-      setCurrentPage("grade");
-      return;
-    }
+    if (name) {
+      if (!grade) {
+        setCurrentPage("grade");
+        return;
+      }
 
-    if (!schoolName) {
-      setCurrentPage("school");
-      return;
-    }
+      if (!schoolName) {
+        setCurrentPage("school");
+        return;
+      }
 
-    if (!studyIntent) {
-      setCurrentPage("intent");
-      return;
-    }
+      if (!studyIntent) {
+        setCurrentPage("intent");
+        return;
+      }
 
-    if (!avatar) {
-      setCurrentPage("avatar");
-      return;
-    }
+      if (!avatar) {
+        setCurrentPage("avatar");
+        return;
+      }
 
-    setCurrentPage("dashboard");
+      setCurrentPage("dashboard");
+    }
   }, [
     name,
     grade,
@@ -134,9 +128,6 @@ function App() {
     currentPage,
   ]);
 
-  /*
-   * If the student logs out, return to onboarding.
-   */
   useEffect(() => {
     if (
       !name &&
@@ -158,32 +149,20 @@ function App() {
     currentPage,
   ]);
 
-  /*
-   * Developer login.
-   */
   function openDeveloperLogin() {
     setCurrentPage("developer-login");
   }
 
-  /*
-   * Developer successfully logged in.
-   */
   function handleDeveloperLogin() {
     setDeveloperLoggedIn(true);
     setCurrentPage("developer-dashboard");
   }
 
-  /*
-   * Developer logout.
-   */
   function handleDeveloperLogout() {
     setDeveloperLoggedIn(false);
     setCurrentPage("developer-login");
   }
 
-  /*
-   * Student logout.
-   */
   function handleStudentLogout() {
     logout();
     setViewerMaterialId(null);
@@ -191,30 +170,18 @@ function App() {
     setCurrentPage("welcome");
   }
 
-  /*
-   * Change grade from the dashboard.
-   */
   function handleChangeGrade() {
     setCurrentPage("grade");
   }
 
-  /*
-   * Open a study material.
-   */
   function handleOpenViewer(materialId: string) {
     setViewerMaterialId(materialId);
   }
 
-  /*
-   * Close the study material viewer.
-   */
   function handleCloseViewer() {
     setViewerMaterialId(null);
   }
 
-  /*
-   * Developer login page.
-   */
   if (currentPage === "developer-login") {
     return (
       <>
@@ -227,9 +194,6 @@ function App() {
     );
   }
 
-  /*
-   * Developer dashboard.
-   */
   if (currentPage === "developer-dashboard") {
     return (
       <>
@@ -242,9 +206,6 @@ function App() {
     );
   }
 
-  /*
-   * Normal student welcome page.
-   */
   if (currentPage === "welcome") {
     return (
       <>
@@ -332,9 +293,6 @@ function App() {
     );
   }
 
-  /*
-   * Main student dashboard.
-   */
   return (
     <>
       <DashboardPage

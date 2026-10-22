@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 from flask import Flask, jsonify, request, session
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.security import check_password_hash
@@ -79,6 +81,24 @@ SOMA_CORS_ORIGINS = os.getenv(
 # ============================================================
 
 app = Flask(__name__)
+
+# ============================================================
+# RATE LIMITING
+# ============================================================
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["100 per minute"],
+    storage_uri="memory://",
+)
+
+@app.errorhandler(429)
+def rate_limit_exceeded(error):
+    return jsonify({
+        "success": False,
+        "error": "Too many requests. Please try again shortly.",
+    }), 429
 
 app.secret_key = os.getenv(
     "FLASK_SECRET_KEY",
@@ -349,7 +369,13 @@ def normalize_amount(value):
     if amount <= 0:
         return None
 
-    return amount.quantize(Decimal("0.01"))
+    # Do not silently round a supplied payment amount.
+    # IntaSend M-Pesa STK Push can round fractional amounts.
+    quantized = amount.quantize(Decimal("0.01"))
+    if amount != quantized:
+        return None
+
+    return quantized
 
 
 def amounts_match(first, second):
@@ -509,6 +535,75 @@ def extract_intasend_invoice(response):
     return {}
 
 
+def verify_intasend_invoice_for_session(payment_session, response):
+    """
+    Verify IntaSend's authoritative status response against the
+    locally stored payment session. A webhook payload alone is
+    never sufficient to authorize a wallet credit.
+    """
+    if not isinstance(response, dict):
+        return False, "Invalid IntaSend status response.", ""
+
+    invoice = extract_intasend_invoice(response)
+    if not isinstance(invoice, dict) or not invoice:
+        return False, "IntaSend invoice details are missing.", ""
+
+    state = str(
+        invoice.get("state") or response.get("state") or ""
+    ).strip().upper()
+
+    if state != "COMPLETE":
+        return False, "IntaSend payment is not complete.", state
+
+    returned_invoice_id = extract_intasend_invoice_id(response)
+    returned_api_ref = extract_intasend_api_ref(response)
+
+    expected_invoice_id = str(
+        payment_session.get("checkout_request_id") or ""
+    ).strip()
+    expected_api_ref = str(
+        payment_session.get("merchant_request_id") or ""
+    ).strip()
+
+    if not returned_invoice_id or not expected_invoice_id:
+        return False, "Invoice ID is missing.", state
+
+    if not hmac.compare_digest(returned_invoice_id, expected_invoice_id):
+        return False, "Invoice ID mismatch.", state
+
+    if not returned_api_ref or not expected_api_ref:
+        return False, "Payment reference is missing.", state
+
+    if not hmac.compare_digest(returned_api_ref, expected_api_ref):
+        return False, "Payment reference mismatch.", state
+
+    provider_amount = (
+        invoice.get("value")
+        if invoice.get("value") is not None
+        else invoice.get("amount")
+        if invoice.get("amount") is not None
+        else response.get("value")
+        if response.get("value") is not None
+        else response.get("amount")
+    )
+    expected_amount = payment_session.get("amount")
+
+    if provider_amount is None or expected_amount is None:
+        return False, "Payment amount is missing.", state
+
+    if not amounts_match(provider_amount, expected_amount):
+        return False, "Payment amount mismatch.", state
+
+    currency = str(
+        invoice.get("currency") or response.get("currency") or ""
+    ).strip().upper()
+
+    if currency != "KES":
+        return False, "Payment currency mismatch.", state
+
+    return True, "Payment verified.", state
+
+
 # ============================================================
 # STUDENT HELPERS
 # ============================================================
@@ -532,16 +627,23 @@ def get_student_by_code(conn, soma_hub_code):
 def process_completed_payment(
     payment_session_id,
     invoice_id=None,
+    verified_payment=False,
 ):
     """
-    Atomically credits a completed payment.
+    Atomically credits a provider-verified completed payment.
 
-    Important:
-    - Locks the payment session.
-    - Uses a PostgreSQL advisory transaction lock.
-    - Checks for an existing wallet credit.
-    - Never credits the same payment twice.
+    Wallet credits are refused unless the authoritative IntaSend
+    status response has already been verified by the caller.
     """
+    if not verified_payment:
+        app.logger.warning(
+            "Refusing to credit unverified payment session %s",
+            payment_session_id,
+        )
+        return {
+            "success": False,
+            "error": "Payment verification is required.",
+        }
 
     conn = get_db()
 
@@ -601,6 +703,13 @@ def process_completed_payment(
                 "error": "Invalid payment amount.",
             }
 
+        if amount != amount.to_integral_value():
+            conn.rollback()
+            return {
+                "success": False,
+                "error": "Payment amount must be a whole KSh amount.",
+            }
+
         soma_hub_code = str(
             payment_session.get("soma_hub_code") or ""
         ).strip()
@@ -643,6 +752,8 @@ def process_completed_payment(
             """
             SELECT
                 id,
+                student_id,
+                soma_hub_code,
                 amount,
                 transaction_type,
                 reference
@@ -654,6 +765,30 @@ def process_completed_payment(
         ).fetchone()
 
         if existing_transaction:
+            same_transaction = (
+                str(existing_transaction.get("transaction_type") or "").upper()
+                == "CREDIT"
+                and str(existing_transaction.get("student_id"))
+                == str(student_id)
+                and str(existing_transaction.get("soma_hub_code") or "")
+                == soma_hub_code
+                and amounts_match(
+                    existing_transaction.get("amount"),
+                    amount,
+                )
+            )
+
+            if not same_transaction:
+                conn.rollback()
+                app.logger.error(
+                    "Payment reference collision for session %s",
+                    payment_session_id,
+                )
+                return {
+                    "success": False,
+                    "error": "Payment reference conflict.",
+                }
+
             conn.execute(
                 """
                 UPDATE payment_sessions
@@ -793,15 +928,21 @@ def process_completed_payment(
 # ============================================================
 
 def sync_payment_from_intasend(payment_session):
+    """
+    Query IntaSend's authoritative status endpoint. Only a COMPLETE
+    invoice whose ID, API reference, amount and currency match the
+    stored payment session may trigger a wallet credit.
+    """
     if not payment_session:
         return {
             "success": False,
             "error": "Payment session not found.",
         }
 
-    invoice_id = payment_session.get(
-        "checkout_request_id"
-    )
+    payment_session = dict(payment_session)
+    invoice_id = str(
+        payment_session.get("checkout_request_id") or ""
+    ).strip()
 
     if not invoice_id:
         return {
@@ -809,87 +950,61 @@ def sync_payment_from_intasend(payment_session):
             "error": "Payment has no IntaSend invoice ID.",
         }
 
-    service = get_intasend_service()
+    try:
+        service = get_intasend_service()
+        response = service.collect.status(invoice_id=invoice_id)
+    except Exception:
+        app.logger.exception(
+            "Could not retrieve IntaSend status for payment session %s",
+            payment_session.get("id"),
+        )
+        return {
+            "success": False,
+            "error": "Unable to verify payment status with the provider.",
+        }
 
-    response = service.collect.status(
-        invoice_id=invoice_id
-    )
+    if not isinstance(response, dict):
+        app.logger.error(
+            "Invalid IntaSend status response for payment session %s",
+            payment_session.get("id"),
+        )
+        return {
+            "success": False,
+            "error": "Invalid payment status response.",
+        }
 
     invoice = extract_intasend_invoice(response)
-
     state = str(
-        invoice.get("state")
-        or response.get("state", "")
-        or ""
+        invoice.get("state") or response.get("state") or ""
     ).strip().upper()
 
-    returned_invoice_id = (
-        invoice.get("invoice_id")
-        or response.get("invoice_id")
-    )
-
-    returned_api_ref = (
-        invoice.get("api_ref")
-        or response.get("api_ref")
-        or response.get("api_reference")
-    )
-
-    expected_api_ref = payment_session.get(
-        "merchant_request_id"
-    )
-
-    if (
-        returned_invoice_id
-        and str(returned_invoice_id).strip()
-        != str(invoice_id).strip()
-    ):
-        return {
-            "success": False,
-            "error": "IntaSend invoice mismatch.",
-        }
-
-    if (
-        expected_api_ref
-        and returned_api_ref
-        and str(returned_api_ref).strip()
-        != str(expected_api_ref).strip()
-    ):
-        return {
-            "success": False,
-            "error": "IntaSend payment reference mismatch.",
-        }
-
-    returned_amount = (
-        invoice.get("value")
-        or invoice.get("amount")
-        or response.get("value")
-        or response.get("amount")
-    )
-
-    if returned_amount is not None:
-        if not amounts_match(
-            returned_amount,
-            payment_session.get("amount"),
-        ):
+    if state == "COMPLETE":
+        verified, reason, _ = verify_intasend_invoice_for_session(
+            payment_session,
+            response,
+        )
+        if not verified:
+            app.logger.warning(
+                "IntaSend verification failed for session %s: %s",
+                payment_session.get("id"),
+                reason,
+            )
             return {
                 "success": False,
-                "error": "IntaSend payment amount mismatch.",
+                "error": "Payment could not be verified.",
             }
 
-    if state == "COMPLETE":
         result = process_completed_payment(
             payment_session["id"],
             invoice_id=invoice_id,
-        )
-
+            verified_payment=True,
+                    )
         if result.get("success"):
             result["state"] = "COMPLETE"
-
         return result
 
-    if state == "FAILED":
+    if state in {"FAILED", "CANCELED", "CANCELLED"}:
         conn = get_db()
-
         try:
             conn.execute(
                 """
@@ -900,9 +1015,10 @@ def sync_payment_from_intasend(payment_session):
                 """,
                 (payment_session["id"],),
             )
-
             conn.commit()
-
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1508,6 +1624,7 @@ def get_student_performance(soma_hub_code):
 # ============================================================
 
 @app.post("/api/admin/login")
+@limiter.limit("5 per minute")
 def admin_login():
     data = request.get_json(silent=True) or {}
 
@@ -1739,6 +1856,7 @@ def admin_top_students():
 @app.post(
     "/api/intasend/payment-session"
 )
+@limiter.limit("3 per minute")
 def create_payment_session():
     data = request.get_json(
         silent=True
@@ -1804,6 +1922,13 @@ def create_payment_session():
     amount = normalize_amount(
         raw_amount
     )
+
+    if amount is not None and amount != amount.to_integral_value():
+        return jsonify({
+            "success": False,
+            "error": "Payment amount must be a whole KSh amount.",
+            "field": "amount",
+        }), 400
 
     if amount is None:
         return jsonify({
@@ -2011,7 +2136,7 @@ def create_payment_session():
 
         return jsonify({
             "success": False,
-            "error": str(exc),
+            "error": "Unable to initiate payment. Please try again.",
         }), 502
 
 
@@ -2255,18 +2380,18 @@ def intasend_webhook():
         conn.close()
 
     if state == "COMPLETE":
-        result = process_completed_payment(
-            payment_session["id"],
-            invoice_id=(
-                invoice_id
-                or payment_session.get(
-                    "checkout_request_id"
-                )
-            ),
-        )
+        result = sync_payment_from_intasend(payment_session)
 
         if not result.get("success"):
-            return jsonify(result), 500
+            return jsonify(result), 409
+
+        if str(result.get("state") or "").upper() != "COMPLETE":
+            return jsonify({
+                "success": True,
+                "processed": False,
+                "state": result.get("state") or "PENDING",
+                "message": "Provider has not confirmed a completed payment.",
+            })
 
         try:
             fulfil_result = (
@@ -2349,6 +2474,7 @@ def intasend_webhook():
 @app.get(
     "/api/intasend/payment-status/<session_id>"
 )
+@limiter.limit("30 per minute")
 def payment_status(session_id):
     session_id = str(
         session_id
@@ -2683,6 +2809,7 @@ def dev_test_payment(session_id):
         invoice_id=payment_session.get(
             "checkout_request_id"
         ),
+        verified_payment=True,
     )
 
     if not result.get("success"):
