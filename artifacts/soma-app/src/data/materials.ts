@@ -1,4 +1,4 @@
-import { TEMPLATE_SUBJECTS_BY_GRADE } from "@/components/Generators/questionTemplates";
+import { SUBJECTS_BY_SOURCE_GRADE } from "@/data/gradeSubjects";
 
 export function seededRandom(seed: number): () => number {
   let s = seed;
@@ -310,7 +310,7 @@ function getTopicsForGrade(gradeKey: string): Record<string, string[]> {
       ? `Grade ${gradeKey.slice(7)}`
       : null;
   if (sourceGrade) {
-    const subjects = TEMPLATE_SUBJECTS_BY_GRADE[sourceGrade as keyof typeof TEMPLATE_SUBJECTS_BY_GRADE];
+    const subjects = SUBJECTS_BY_SOURCE_GRADE[sourceGrade as keyof typeof SUBJECTS_BY_SOURCE_GRADE];
     const sourceTopics = TOPICS_BY_SOURCE_GRADE[sourceGrade];
     const topics: Record<string, string[]> = {};
     for (const subject of subjects ?? []) {

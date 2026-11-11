@@ -1,1 +1,0 @@
-export { chemistryTemplates } from "./questionTemplates";

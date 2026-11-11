@@ -1,1 +1,0 @@
-export { creTemplates } from "./questionTemplates";

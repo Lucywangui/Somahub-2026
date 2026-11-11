@@ -1,1 +1,0 @@
-export { businessStudiesTemplates } from "./questionTemplates";

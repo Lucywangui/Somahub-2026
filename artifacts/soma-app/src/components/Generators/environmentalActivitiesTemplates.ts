@@ -1,1 +1,0 @@
-export { environmentalActivitiesTemplates } from "./questionTemplates";

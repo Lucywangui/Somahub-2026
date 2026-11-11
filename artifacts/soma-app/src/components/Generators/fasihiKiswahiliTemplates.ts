@@ -1,1 +1,0 @@
-export { fasihiYaKiswahiliTemplates } from "./questionTemplates";

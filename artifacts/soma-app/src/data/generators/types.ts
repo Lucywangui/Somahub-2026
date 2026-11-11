@@ -6,6 +6,8 @@ export interface Question {
   correct: number; // 0-3
   /** Short worked reason the correct answer is right — shown after answering. */
   explanation?: string;
+  /** Catalogue topics this question belongs to (used to keep topical quizzes on topic). */
+  topics?: string[];
 }
 
 /** Context handed to every subject generator. */

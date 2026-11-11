@@ -44,10 +44,11 @@ function normTopic(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function factMatchesTopics(fact: Fact, topics: string[]): boolean {
-  if (!fact.topics || fact.topics.length === 0) return false;
+/** True when any of a question's topic tags loosely matches the material's topics. */
+export function matchesTopics(tags: string[] | undefined, topics: string[]): boolean {
+  if (!tags || tags.length === 0) return false;
   const wanted = topics.map(normTopic);
-  return fact.topics.some((ft) => {
+  return tags.some((ft) => {
     const f = normTopic(ft);
     return wanted.some((w) => w.includes(f) || f.includes(w) || w.split(" ").some((word) => word.length > 3 && f.includes(word)));
   });
@@ -76,7 +77,7 @@ export function makeFactBankGenerator(cfg: FactBankConfig): SubjectGenerator {
     if (all.length === 0) return [];
 
     const answerPool = Array.from(new Set(all.map((f) => f.a)));
-    const topicBiased = all.filter((f) => factMatchesTopics(f, ctx.topics));
+    const topicBiased = all.filter((f) => matchesTopics(f.topics, ctx.topics));
     // Lead with topic-relevant facts, then everything else for depth.
     const ordered = [...shuffle(ctx.rng, topicBiased), ...shuffle(ctx.rng, all.filter((f) => !topicBiased.includes(f)))];
 
@@ -88,7 +89,7 @@ export function makeFactBankGenerator(cfg: FactBankConfig): SubjectGenerator {
         ? own
         : [...own, ...shuffle(ctx.rng, answerPool.filter((a) => a !== fact.a && !own.includes(a)))];
       const q = buildMCQ(ctx.rng, fact.q, fact.a, distractors, fact.why ?? factStatement(fact));
-      if (q) out.push(q);
+      if (q) out.push(fact.topics?.length ? { ...q, topics: fact.topics } : q);
     }
     return out;
   };
