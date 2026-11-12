@@ -1,1 +1,0 @@
-export { hygieneAndNutritionTemplates } from "./questionTemplates";

@@ -1,1 +1,0 @@
-export { integratedScienceTemplates } from "./questionTemplates";

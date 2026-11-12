@@ -27,6 +27,8 @@ import { TopicNotesOverlay } from "./TopicNotesOverlay";
 interface Props {
   material: Material;
   onClose: () => void;
+  /** Switch this material to a different question set and restart. */
+  onNewSet?: () => void;
 }
 
 const TOTAL_QUESTIONS = 15;
@@ -34,6 +36,7 @@ const TOTAL_QUESTIONS = 15;
 export function TopicalViewer({
   material,
   onClose,
+  onNewSet,
 }: Props) {
   const addQuizResult = useSomaStore(
     (s) => s.addQuizResult
@@ -66,7 +69,9 @@ export function TopicalViewer({
     return getQuestionsForMaterial(
       material,
       TOTAL_QUESTIONS,
-      Date.now()
+      useSomaStore.getState().quizAttempts[
+        material.id
+      ] ?? 0
     );
   });
 
@@ -598,6 +603,27 @@ export function TopicalViewer({
             >
               Back to Dashboard
             </Button>
+
+            {onNewSet && (
+              <Button
+                size="lg"
+                variant="outline"
+                className="
+                  px-8
+                  py-6
+                  text-lg
+                  rounded-full
+                  border-2
+                  border-white/40
+                  bg-transparent
+                  text-white
+                  hover:bg-white/10
+                "
+                onClick={onNewSet}
+              >
+                🔁 Try a new question set
+              </Button>
+            )}
           </div>
         </motion.div>
       </>

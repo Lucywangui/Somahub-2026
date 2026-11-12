@@ -1,1 +1,0 @@
-export { physicsTemplates } from "./questionTemplates";

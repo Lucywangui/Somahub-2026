@@ -1,6 +1,6 @@
 # SOMA APP
 
-SOMA APP helps learners find, purchase, and practise curriculum learning materials with randomized multiple-choice questions.
+SOMA APP helps learners find, purchase, and practise curriculum learning materials with multiple-choice questions.
 
 ## Run & Operate
 
@@ -29,6 +29,7 @@ SOMA APP helps learners find, purchase, and practise curriculum learning materia
 - `artifacts/soma-app/src/data/materials.ts` — curriculum material catalog
 - `artifacts/soma-app/src/data/questions.ts` — thin entry point; delegates to the generator engine
 - `artifacts/soma-app/src/data/generators/` — grade-parametric question generators + `generateQuiz`
+- `artifacts/soma-app/src/data/generators/banks/<subject>/<band>.ts` — authored question banks (~15 per syllabus topic, tagged with exact catalogue topic names)
 - `artifacts/soma-app/src/data/grade.ts` — maps a gradeKey to an exact grade (1–12) and band
 - `artifacts/soma-app/src/data/studyNotes.ts` — assembles per-topic study notes for a material
 - `artifacts/soma-app/src/data/notes.generated.ts` — generated note content (see `scripts/build-study-notes.mts`)
@@ -42,7 +43,7 @@ SOMA APP helps learners find, purchase, and practise curriculum learning materia
 
 ## Architecture decisions
 
-- Question generation is offline and procedural. `generateQuiz(material, count, attemptSeed)` in `src/data/generators/` builds questions tuned to the material's exact grade, deduped by text, with question and option order shuffled per call. A changing `attemptSeed` gives a fresh set on a retake; a stable one reproduces it.
+- Question generation is offline and deterministic. Each (grade, subject) group has one fixed question pool (`questionPool`); `generateQuiz(material, count, attempt)` deals that pool out across the group's materials — on-topic questions first, then the least-used — so every material has its own fixed set and materials overlap as little as possible. `attempt` 0 is the material's permanent set; the learner's "new question set" button bumps the stored `quizAttempts[materialId]` to get an alternative stable set. Never seed from the clock.
 - Study notes are offline too. `scripts/build-study-notes.mts` resolves each (subject, topic) to an article on an open wiki (Wikipedia / Simple English Wikipedia / Wikipedia Kiswahili — CC BY-SA 4.0), splits it into an **overview + navigable sub-topics** (from the article's sections), and bakes the result into `src/data/notes.generated.ts`. Runtime never hits the network. Derived notes are CC BY-SA 4.0 and each carries its source, shown on the notes screen.
 - `getStudyNotes` layers content best-first: generated overview+sub-topics → hand-authored `TOPIC_NOTES` (as key points) → curriculum-fact statements, then appends worked revision questions from the quiz generator.
 - All fetched note text is rewritten at read time for the learner's band by `readable()` in `studyNotes.ts`: keeps the opening definition, caps sentence count/length per band, drops etymology/meta/disambiguation sentences, and swaps common hard words for plain ones in primary bands. Entries that came from a disambiguation page are rejected and fall back to the fact statements.
@@ -56,7 +57,7 @@ SOMA APP helps learners find, purchase, and practise curriculum learning materia
 ## Product
 
 - Learners complete a short onboarding flow, choose a curriculum level, search materials, purchase them with wallet funds, and open topical or exam practice.
-- Every opened material presents 15 randomized multiple-choice questions from the repaired template banks.
+- Every opened material presents its own fixed 15 multiple-choice questions; reopening shows the same set.
 
 ## User preferences
 
@@ -65,7 +66,7 @@ SOMA APP helps learners find, purchase, and practise curriculum learning materia
 ## Gotchas
 
 - The SOMA Vite config intentionally requires `PORT` and `BASE_PATH`; the preview workflow must provide both values.
-- Run the root `typecheck` after editing generator templates because parser errors in one template can create thousands of misleading downstream diagnostics.
+- To add questions, edit a bank file and run `npx vite-node scripts/check-question-bank.mts "<Subject>" <band>` (from `artifacts/soma-app`); `npx vitest run src/data/generators` enforces bank validity and that every group has enough distinct questions for its materials.
 
 ## Pointers
 

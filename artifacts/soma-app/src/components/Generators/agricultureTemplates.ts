@@ -1,1 +1,0 @@
-export { agricultureTemplates } from "./questionTemplates";

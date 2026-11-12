@@ -1,1 +1,0 @@
-export { mathTemplates } from "./questionTemplates";

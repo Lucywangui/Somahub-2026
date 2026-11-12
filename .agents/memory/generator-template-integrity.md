@@ -1,10 +1,10 @@
 ---
 name: Generator template integrity
-description: Durable constraints for maintaining SOMA's curriculum question templates
+description: Durable constraints for maintaining SOMA's curriculum question banks
 ---
 
-SOMA's question experience depends on valid subject template banks, not on an external generator at runtime. Keep each template's output as one question text, four options, and a correct answer that is one of those options.
+SOMA's questions come from `artifacts/soma-app/src/data/generators/`: the original content files plus authored banks in `banks/<subject>/<band>.ts`. Every question is one stem, one correct answer, three distinct wrong answers, catalogue topic tags, and a `why`. (The old `components/Generators/*Templates.ts` files were empty and have been removed.)
 
-**Why:** A corrupted template file prevents TypeScript from parsing the entire frontend, producing a large cascade of misleading errors and making the app appear not to run at all.
+**Why:** Each grade+subject group has 30 materials × 15 questions. When the pool is small, every material shows the same questions, and if questions are seeded from the clock they change on every open. Both were reported by users.
 
-**How to apply:** When generator errors appear, check shared template types and syntax across the generator directory first, then verify that the material loader returns exactly 15 questions with valid answer indexes.
+**How to apply:** Never seed `generateQuiz` with `Date.now()`. Use attempt 0, or the stored `quizAttempts` value. When adding content, tag it with exact topic names, run `scripts/check-question-bank.mts`, then `vitest run src/data/generators`. The supply test fails if any group drops below its minimum pool size.

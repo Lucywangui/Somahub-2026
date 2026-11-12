@@ -121,5 +121,5 @@ export function questionKey(q: Question): string {
 export function shuffleOptions(rng: () => number, q: Question): Question {
   const correctValue = q.options[q.correct];
   const shuffled = shuffle(rng, q.options) as [string, string, string, string];
-  return { text: q.text, options: shuffled, correct: shuffled.indexOf(correctValue), explanation: q.explanation };
+  return { text: q.text, options: shuffled, correct: shuffled.indexOf(correctValue), explanation: q.explanation, topics: q.topics };
 }
