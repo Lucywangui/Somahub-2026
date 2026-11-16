@@ -166,4 +166,14 @@ export const FACTS: Fact[] = [
   { q: "Kuzungumza kwa sauti ya chini sana sikioni mwa mtu huitwa:", a: "kunong'ona", wrong: ["kupiga kelele", "kuimba", "kulia"], topics: ["Kusikia & Kuzungumza"], why: "Kunong'ona ni kusema kwa sauti ya chini sana." },
   { q: "Mama akikutuma umpelekee baba ujumbe, unapaswa:", a: "kuueleza jinsi ulivyopewa", wrong: ["kubadilisha ujumbe", "kuusahau", "kuongeza maneno yako"], topics: ["Kusikia & Kuzungumza"], why: "Ujumbe hufikishwa bila kubadilishwa." },
   { q: "Sauti ya mwanzo ya “ng'ombe” inapatikana pia katika neno:", a: "ng'ambo", wrong: ["ngoma", "nyanya", "nguo"], topics: ["Kusikia & Kuzungumza"], why: "Ng'ombe na ng'ambo huanza kwa sauti “ng'”." },
+
+  // ── Nyongeza (round 2): Mashairi & Nyimbo ──
+  { q: "Kifungu kimoja cha shairi au wimbo chenye mistari kadhaa huitwa:", a: "ubeti", wrong: ["kiitikio", "kichwa", "methali"], topics: ["Mashairi & Nyimbo"], why: "Shairi au wimbo hugawanywa katika beti; kila kifungu ni ubeti mmoja." },
+  { q: "Wimbo unaoimbwa na watoto wanapocheza kuruka kamba huitwa wimbo wa:", a: "michezo", wrong: ["maombolezo", "harusi", "taifa"], topics: ["Mashairi & Nyimbo"], why: "Nyimbo za michezo huimbwa watoto wakicheza pamoja." },
+  { q: "Katika wimbo “Mama yangu mpendwa, unanipenda sana”, mwimbaji anamwimbia:", a: "mama", wrong: ["baba", "mwalimu", "rafiki"], topics: ["Mashairi & Nyimbo"], why: "Maneno “Mama yangu mpendwa” yanaonyesha kuwa wimbo unamhusu mama." },
+
+  // ── Nyongeza (round 2): Ubunifu wa Lugha ──
+  { q: "Kitendawili: Nyumba yangu ina nguzo moja tu.", a: "uyoga", wrong: ["mti", "nyumba ya nyasi", "mwavuli wa mvua"], topics: ["Ubunifu wa Lugha"], why: "Uyoga una shina moja linaloshikilia kofia yake kama nguzo moja ya nyumba." },
+  { q: "Kamilisha: Mjanja kama ___.", a: "sungura", wrong: ["kobe", "ng'ombe", "punda"], topics: ["Ubunifu wa Lugha"], why: "Katika hadithi, sungura hujulikana kwa ujanja wake." },
+  { q: "Kamilisha: Mpole kama ___.", a: "njiwa", wrong: ["simba", "chui", "nyoka"], topics: ["Ubunifu wa Lugha"], why: "Njiwa ni ndege mpole, kwa hivyo tunasema “mpole kama njiwa”." },
 ];

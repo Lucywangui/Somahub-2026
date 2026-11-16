@@ -204,4 +204,31 @@ export const FACTS: Fact[] = [
   { q: "Utenzi wa “Al-Inkishafi” unatafakari hasa kuhusu:", a: "kupita kwa anasa za dunia", wrong: ["vita vya Maji Maji", "kilimo cha karafuu", "safari ya anga"], topics: ["Historia ya Fasihi"], why: "Al-Inkishafi hutumia kuporomoka kwa Pate kuonya kuhusu anasa za dunia zinazopita." },
   { q: "Kamati ya Lugha ya Afrika Mashariki iliyosanifisha Kiswahili ilianzishwa mwaka:", a: "1930", wrong: ["1963", "1890", "2010"], topics: ["Historia ya Fasihi", "Utafiti wa Lugha"], why: "Kamati ya Lugha ya Kiswahili (Inter-Territorial Language Committee) iliundwa mwaka 1930." },
   { q: "Mmishonari aliyetunga mojawapo ya kamusi za mwanzo za Kiswahili ni:", a: "Johann Ludwig Krapf", wrong: ["Shaaban Robert", "Ken Walibora", "Ebrahim Hussein"], topics: ["Historia ya Fasihi"], why: "Krapf alitunga kamusi ya Kiswahili katika karne ya 19." },
+
+  // ── Nyongeza (round 2): Ushairi wa Kisasa / Fasihi: Ushairi wa Diwani ──
+  { q: "Mstari mmoja katika ubeti wa shairi huitwa:", a: "mshororo", wrong: ["ubeti", "kina", "mizani"], topics: ["Ushairi wa Kisasa", "Fasihi: Ushairi wa Diwani"], why: "Kila mstari wa ubeti huitwa mshororo." },
+  { q: "Silabi zinazofanana mwishoni mwa vipande vya mishororo ya shairi huitwa:", a: "vina", wrong: ["mizani", "beti", "vituo"], topics: ["Ushairi wa Kisasa", "Fasihi: Ushairi wa Diwani"], why: "Vina ni silabi zinazolingana kisauti katikati au mwishoni mwa mishororo." },
+  { q: "Idadi ya silabi katika mshororo mmoja wa shairi huitwa:", a: "mizani", wrong: ["vina", "beti", "kibwagizo"], topics: ["Ushairi wa Kisasa", "Fasihi: Ushairi wa Diwani"], why: "Mizani hupimwa kwa kuhesabu silabi katika mshororo." },
+  { q: "Mshairi anapotumia maneno yanayojenga picha akilini mwa msomaji, anatumia mbinu ya:", a: "taswira", wrong: ["inkisari", "kibwagizo", "mazida"], topics: ["Ushairi wa Kisasa"], why: "Taswira ni picha anayoijenga msomaji akilini kupitia maneno ya mshairi." },
+  { q: "Ujumbe mkuu ambao mshairi anataka kuwasilisha kwa hadhira yake huitwa:", a: "dhamira", wrong: ["mizani", "kituo", "maleba"], topics: ["Ushairi wa Kisasa"], why: "Dhamira ni lengo au ujumbe ambao mshairi anakusudia kuwasilisha." },
+
+  // ── Nyongeza (round 2): Michezo ya Kuigiza ──
+  { q: "Mazungumzo ya majibizano kati ya wahusika wawili au zaidi katika mchezo wa kuigiza huitwa:", a: "dayolojia", wrong: ["monolojia", "maleba", "maelekezo ya jukwaa"], topics: ["Michezo ya Kuigiza"], why: "Dayolojia ni mazungumzo ya wahusika wawili au zaidi, tofauti na monolojia ya mhusika mmoja." },
+  { q: "Kabla ya kuigiza mchezo mbele ya hadhira, waigizaji hujiandaa kwa:", a: "kufanya mazoezi", wrong: ["kuuza tiketi pekee", "kuandika riwaya", "kuketi miongoni mwa hadhira"], topics: ["Michezo ya Kuigiza"], why: "Mazoezi huwasaidia waigizaji kukariri maneno yao na kuigiza vizuri." },
+  { q: "Mhusika mkuu katika mchezo wa kuigiza ni yule ambaye:", a: "matukio mengi yanamhusu tangu mwanzo hadi mwisho", wrong: ["huonekana jukwaani mara moja tu", "huketi miongoni mwa hadhira", "huandika maelekezo ya jukwaa"], topics: ["Michezo ya Kuigiza"], why: "Mhusika mkuu ndiye kiini cha matukio ya mchezo mzima." },
+
+  // ── Nyongeza (round 2): Mazungumzo Rasmi ──
+  { q: "Afisa anayetunza fedha za chama au kamati huitwa:", a: "mweka hazina", wrong: ["katibu", "mwenyekiti", "mjumbe"], topics: ["Mazungumzo Rasmi"], why: "Mweka hazina hushughulikia mapato na matumizi ya fedha za chama." },
+  { q: "Mambo yote ya ajenda yakishajadiliwa, mwenyekiti:", a: "huahirisha mkutano", wrong: ["huanza kusoma ajenda upya", "huwafukuza wajumbe", "huandika kumbukumbu za mkutano ujao"], topics: ["Mazungumzo Rasmi"], why: "Kuahirisha mkutano ni kuufunga rasmi baada ya kumaliza shughuli zake." },
+  { q: "Katika mjadala rasmi, upande unaounga mkono hoja huitwa:", a: "watetezi", wrong: ["wapinzani", "waamuzi", "hadhira"], topics: ["Mazungumzo Rasmi"], why: "Watetezi huunga mkono hoja na wapinzani huipinga." },
+
+  // ── Nyongeza (round 2): Ufahamu na Muhtasari ──
+  { q: "Soma: “Juma alilala mapema kwa sababu alikuwa amechoka baada ya kucheza kandanda siku nzima.” Kwa nini Juma alilala mapema?", a: "alikuwa amechoka baada ya kucheza kandanda", wrong: ["alikuwa mgonjwa", "hakuwa na kazi ya ziada", "mama yake alimlazimisha"], topics: ["Ufahamu na Muhtasari"], why: "Kifungu kinasema wazi kuwa alilala kwa sababu alikuwa amechoka." },
+  { q: "Soma: “Wakulima wa Mwea hupanda mpunga kwa sababu eneo hilo lina maji mengi ya unyunyiziaji.” Kwa mujibu wa kifungu, mpunga hupandwa Mwea kwa sababu:", a: "kuna maji mengi ya unyunyiziaji", wrong: ["kuna baridi kali", "kuna soko kubwa la mahindi", "ardhi ni ya mchanga mtupu"], topics: ["Ufahamu na Muhtasari"], why: "Sababu iliyotajwa katika kifungu ni wingi wa maji ya unyunyiziaji." },
+  { q: "Soma: “Mvua kubwa ilinyesha; mito ikafurika na kuharibu mashamba.” Neno “kufurika” lina maana ya:", a: "maji kujaa na kumwagika nje ya kingo", wrong: ["maji kukauka kabisa", "mto kubadilisha jina", "maji kugeuka barafu"], topics: ["Ufahamu na Muhtasari"], why: "Mto unapofurika, maji hujaa kupita kiasi na kumwagika nje ya kingo zake." },
+
+  // ── Nyongeza (round 2): Mazungumzo ya Kila Siku ──
+  { q: "Rafiki akikwambia amefaulu mtihani wake, unamwambia:", a: "Hongera!", wrong: ["Pole!", "Hodi!", "Shikamoo!"], topics: ["Mazungumzo ya Kila Siku"], why: "“Hongera” hutumika kumpongeza mtu aliyefanikiwa." },
+  { q: "Unapoagana na wenzako usiku kabla ya kwenda kulala, unasema:", a: "Lala salama.", wrong: ["Habari za asubuhi.", "Shikamoo.", "Hongera."], topics: ["Mazungumzo ya Kila Siku"], why: "“Lala salama” ni maagano ya usiku." },
+  { q: "Mgeni anapoondoka baada ya kuwatembelea, mwenyeji humwambia:", a: "Karibu tena.", wrong: ["Hodi.", "Shikamoo.", "Pole kwa msiba."], topics: ["Mazungumzo ya Kila Siku"], why: "“Karibu tena” humkaribisha mgeni arudi siku nyingine." },
 ];

@@ -48,7 +48,9 @@ export async function apiRequest<T>(
 
   if (!response.ok || body.success === false) {
     throw new ApiError(
-      body.message || "Something went wrong. Please try again.",
+      body.message ||
+        body.error ||
+        "Something went wrong. Please try again.",
       response.status,
       body
     );
@@ -77,4 +79,23 @@ export function newRequestId(): string {
       Math.random().toString(36).slice(2, 12)
     );
   }
+}
+
+let lastWarmUp = 0;
+
+/**
+ * Wake the backend before the learner needs it.
+ *
+ * The free Render instance sleeps when idle and takes ~30 s to start, so the
+ * first payment request after a quiet spell used to stall before the M-Pesa
+ * prompt was even sent. Call this as soon as a payment screen opens; the
+ * learner types their number while the server boots. Fire-and-forget.
+ */
+export function warmUpBackend(): void {
+  const now = Date.now();
+  if (now - lastWarmUp < 5 * 60 * 1000) return;
+  lastWarmUp = now;
+  fetch(`${SOMA_API_BASE_URL}/`, { method: "GET" }).catch(() => {
+    lastWarmUp = 0;
+  });
 }

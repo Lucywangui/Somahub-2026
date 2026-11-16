@@ -5,8 +5,12 @@ import type { Fact } from "./factbank";
 
 /** New questions to author per syllabus topic, per subject-band. */
 export const FACTS_PER_TOPIC = 15;
-/** Hard floor enforced by validation (gives authors a little slack). */
-export const MIN_FACTS_PER_TOPIC = 12;
+/**
+ * Hard floor enforced by validation: every topic needs a full quiz's worth of
+ * questions tagged with its exact name, so a single-topic material never has
+ * to borrow questions from other topics.
+ */
+export const MIN_FACTS_PER_TOPIC = 15;
 
 const BANNED_OPTIONS = /^(all|none|both|neither) of the (above|these)$|^all of them$|^none of them$/i;
 

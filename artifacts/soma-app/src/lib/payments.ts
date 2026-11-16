@@ -17,7 +17,11 @@ export type PaymentStatus =
   | "pending"
   | "completed"
   | "failed"
-  | "expired";
+  | "expired"
+  /** Money arrived but couldn't be matched; it is being sent back to M-Pesa. */
+  | "refunded"
+  /** Money arrived but needs a person to look at it (refund couldn't be started). */
+  | "review";
 
 /**
  * What the server does once the payment is confirmed.
@@ -32,7 +36,8 @@ export type PollOutcome =
       /** "done", "failed: <reason>", or null for a plain top-up. */
       purposeResult: string | null;
     }
-  | { status: "failed" | "expired" }
+  | { status: "failed" | "expired" | "review" }
+  | { status: "refunded"; refundAmount: number | null }
   | { status: "timeout" }
   | { status: "aborted" };
 
@@ -125,11 +130,13 @@ export async function getPaymentStatus(
   status: PaymentStatus;
   walletBalance: number;
   purposeResult: string | null;
+  refundAmount: number | null;
 }> {
   const result = await request<{
     status: PaymentStatus;
     wallet_balance: number;
     purpose_result?: string | null;
+    refund_amount?: number | null;
   }>(
     `/api/intasend/payment-status/${encodeURIComponent(sessionId)}`
   );
@@ -138,6 +145,7 @@ export async function getPaymentStatus(
     status: result.status,
     walletBalance: result.wallet_balance,
     purposeResult: result.purpose_result ?? null,
+    refundAmount: result.refund_amount ?? null,
   };
 }
 
@@ -186,7 +194,9 @@ export async function pollPaymentStatus(
 ): Promise<PollOutcome> {
   const {
     intervalMs = 3000,
-    timeoutMs = 120000,
+    // Learners often take a while to find the phone and enter the PIN, and
+    // M-Pesa confirmations can lag; 2 minutes gave up on real payments.
+    timeoutMs = 5 * 60 * 1000,
     signal,
     fetchStatus = getPaymentStatus,
     wait = sleep,
@@ -215,10 +225,18 @@ export async function pollPaymentStatus(
 
       if (
         result.status === "failed" ||
-        result.status === "expired"
+        result.status === "expired" ||
+        result.status === "review"
       ) {
         return {
           status: result.status,
+        };
+      }
+
+      if (result.status === "refunded") {
+        return {
+          status: "refunded",
+          refundAmount: result.refundAmount,
         };
       }
     } catch {

@@ -27,7 +27,7 @@ function statuses(...sequence: (PaymentStatus | Error)[]) {
   return vi.fn(async () => {
     const next = sequence[Math.min(i++, sequence.length - 1)];
     if (next instanceof Error) throw next;
-    return { status: next, walletBalance: 70, purposeResult: null };
+    return { status: next, walletBalance: 70, purposeResult: null, refundAmount: next === "refunded" ? 20 : null };
   });
 }
 
@@ -65,13 +65,30 @@ describe("pollPaymentStatus", () => {
     expect(fetchStatus).toHaveBeenCalledTimes(3);
   });
 
-  it.each(["failed", "expired"] as const)("stops on %s", async (status) => {
+  it.each(["failed", "expired", "review"] as const)("stops on %s", async (status) => {
     const outcome = await pollPaymentStatus("S1", {
       fetchStatus: statuses("pending", status),
       ...fakeClock(),
     });
 
     expect(outcome).toEqual({ status });
+  });
+
+  it("stops on refunded and reports the refund amount", async () => {
+    const outcome = await pollPaymentStatus("S1", {
+      fetchStatus: statuses("pending", "refunded"),
+      ...fakeClock(),
+    });
+
+    expect(outcome).toEqual({ status: "refunded", refundAmount: 20 });
+  });
+
+  it("waits five minutes by default before giving up", async () => {
+    const fetchStatus = statuses("pending");
+    const outcome = await pollPaymentStatus("S1", { fetchStatus, ...fakeClock() });
+
+    expect(outcome).toEqual({ status: "timeout" });
+    expect(fetchStatus).toHaveBeenCalledTimes(100); // every 3 s for 5 min
   });
 
   it("keeps polling through network errors", async () => {
@@ -133,9 +150,9 @@ describe("startTopUp", () => {
 
     const result = await startTopUp("0712345678", 50);
 
-    expect(result).toEqual({ sessionId: "S1" });
+    expect(result).toEqual({ sessionId: "S1", paymentUrl: null });
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe("http://api.test/api/mpesa/payment-session");
+    expect(url).toBe("http://api.test/api/intasend/payment-session");
     expect(JSON.parse(init.body as string)).toEqual({
       soma_hub_code: "SH-ABC123",
       phone_number: "0712345678",
@@ -152,7 +169,7 @@ describe("startTopUp", () => {
 
     const result = await startTopUp("0712345678", 50);
 
-    expect(result).toEqual({ sessionId: "S2" });
+    expect(result).toEqual({ sessionId: "S2", paymentUrl: null });
     expect(syncStudentToBackend).toHaveBeenCalledWith({
       soma_hub_code: "SH-ABC123",
       name: "Wanjiku",
@@ -160,6 +177,15 @@ describe("startTopUp", () => {
       grade: "Grade 7",
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces the backend's `error` field when there is no `message`", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(502, { success: false, error: "Unable to initiate payment. Please try again." })),
+    );
+
+    await expect(startTopUp("0712345678", 50)).rejects.toThrow("Unable to initiate payment. Please try again.");
   });
 
   it("surfaces the backend's message on other errors", async () => {

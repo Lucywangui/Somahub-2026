@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSomaStore } from "@/lib/storage";
 import { syncAccount } from "@/lib/account";
+import { warmUpBackend } from "@/lib/api";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,6 +53,8 @@ export function UnlockDialog({
 
   useEffect(() => {
     setView({ name: "choose" });
+    // A purchase may follow: start waking the server now.
+    if (prompt?.materialId) warmUpBackend();
   }, [prompt?.materialId]);
 
   if (!prompt) {

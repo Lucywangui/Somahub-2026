@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MATERIALS, type Material } from "@/data/materials";
 import { resolveGrade } from "@/data/grade";
-import { generateQuiz, questionPool } from "@/data/generators";
+import { generateQuiz, practiceQuestions, questionPool } from "@/data/generators";
 import { matchesTopics } from "@/data/generators/factbank";
 import { contentFactsForSubject } from "@/data/generators/contentFacts";
 import { QUESTION_BANKS } from "@/data/generators/banks";
@@ -45,29 +45,25 @@ describe("generateQuiz", () => {
     }
   });
 
-  it("gives a mostly different set when a new question set is requested", () => {
-    // An exam covers the whole syllabus, so there is plenty of room for a fresh set.
-    // (A single-topic quiz stays on its topic first, so it can only change as much
-    // as that topic's question supply allows.)
-    const m = sample("Geography", "senior-10", "exam");
-    const base = new Set(generateQuiz(m, COUNT, 0).map((q) => q.text));
-    const next = generateQuiz(m, COUNT, 1);
-    const overlap = next.filter((q) => base.has(q.text)).length;
-    expect(overlap).toBeLessThanOrEqual(5);
-    expect(generateQuiz(m, COUNT, 1)).toEqual(next); // a given set is itself stable
+  it("fills every topical quiz only with questions tagged with its exact topics", () => {
+    const failures: string[] = [];
+    for (const m of MATERIALS) {
+      if (m.type !== "topical") continue;
+      const tagsByText = new Map(questionPool(m).map((q) => [q.text, q.topics ?? []]));
+      const off = generateQuiz(m, COUNT).filter((q) => !(tagsByText.get(q.text) ?? []).some((t) => m.topics.includes(t)));
+      if (off.length) failures.push(`${m.id}: ${off.length} off-topic, e.g. "${off[0].text.slice(0, 60)}"`);
+    }
+    expect(failures.slice(0, 20)).toEqual([]);
   });
 
-  it("keeps single-topic quizzes on their topic", () => {
+  it("gives study-note practice questions that are on-topic and not in the quiz", () => {
     for (const ms of groups.values()) {
-      if (ms[0].subject === "Mathematics") continue; // procedural, not topic-tagged
-      const m = ms.find((x) => x.type === "topical" && x.topics.length === 1)!;
-      const pool = questionPool(m);
-      const available = pool.filter((q) => matchesTopics(q.topics, m.topics)).length;
-      const onTopic = generateQuiz(m, COUNT).filter((q) => {
-        const src = pool.find((p) => p.text === q.text);
-        return matchesTopics(src?.topics, m.topics);
-      }).length;
-      expect(onTopic, `${m.id}`).toBe(Math.min(COUNT, available));
+      const m = ms.find((x) => x.type === "topical")!;
+      const quiz = new Set(generateQuiz(m, COUNT).map((q) => q.text));
+      const practice = practiceQuestions(m, 6);
+      expect(practice).toHaveLength(6);
+      expect(practice.filter((q) => quiz.has(q.text))).toEqual([]);
+      expect(practiceQuestions(m, 6)).toEqual(practice);
     }
   });
 });
@@ -90,7 +86,6 @@ describe("question supply (guards against materials repeating each other)", () =
 
 describe("authored question banks", () => {
   for (const { subject, band } of subjectBands()) {
-    if (subject === "Mathematics") continue;
     it(`${subject} / ${band} is valid and covers every topic`, () => {
       const facts = QUESTION_BANKS[subject]?.[band as GradeBand] ?? [];
       const existing = MATERIALS.filter((m) => m.subject === subject && resolveGrade(m.gradeKey).band === band).flatMap((m) => {

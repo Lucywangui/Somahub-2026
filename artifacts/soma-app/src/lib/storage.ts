@@ -512,8 +512,6 @@ interface SomaState {
   transactions: Transaction[];
   quizResults: QuizResult[];
   quizProgress: Record<string, QuizProgress>;
-  /** Which question set each material is on (0 = its fixed default set). */
-  quizAttempts: Record<string, number>;
   termPoints: Record<string, TermPoints>;
   studyNotesCompleted: Record<string, string[]>;
 
@@ -584,11 +582,6 @@ interface SomaState {
     materialId: string
   ) => void;
 
-  /** Move a material on to a new question set (and drop any in-progress attempt). */
-  startNewQuestionSet: (
-    materialId: string
-  ) => void;
-
   logout: () => void;
 }
 
@@ -613,6 +606,7 @@ const KEYS = [
   "soma_transactions",
   "soma_quiz_results",
   "soma_quiz_progress",
+  // No longer written; kept so logout clears it from older installs.
   "soma_quiz_attempts",
   "soma_term_points",
   "soma_study_notes_completed",
@@ -810,14 +804,6 @@ export const useSomaStore =
           Record<string, QuizProgress>
         >(
           "soma_quiz_progress",
-          {}
-        ),
-
-      quizAttempts:
-        loadState<
-          Record<string, number>
-        >(
-          "soma_quiz_attempts",
           {}
         ),
 
@@ -1835,32 +1821,6 @@ export const useSomaStore =
         });
       },
 
-      startNewQuestionSet: (
-        materialId
-      ) => {
-        set((state) => {
-          const attempts = {
-            ...state.quizAttempts,
-            [materialId]:
-              (state.quizAttempts[materialId] ?? 0) + 1,
-          };
-
-          const progress = {
-            ...state.quizProgress,
-          };
-
-          delete progress[materialId];
-
-          save("soma_quiz_attempts", attempts);
-          save("soma_quiz_progress", progress);
-
-          return {
-            quizAttempts: attempts,
-            quizProgress: progress,
-          };
-        });
-      },
-
       /* =====================================================
          LOGOUT
          ===================================================== */
@@ -1926,8 +1886,6 @@ export const useSomaStore =
           quizResults: [],
 
           quizProgress: {},
-
-          quizAttempts: {},
 
           termPoints: {},
 
