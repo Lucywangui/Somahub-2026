@@ -128,21 +128,28 @@ export function questionPool(material: Pick<Material, "gradeKey" | "subject">): 
   return pool;
 }
 
-function isOnTopic(material: Material, q: Question): boolean {
-  // Exams cover the whole syllabus, so every question counts as relevant.
-  if (material.type === "exam") return true;
-  return matchesTopics(q.topics, material.topics);
+/**
+ * How well a question fits a material, as a sort tier (lower = better):
+ *   0  tagged with one of the material's exact catalogue topic names
+ *   1  tagged with a loosely related topic (older content uses other names)
+ *   2  anything else
+ * Exams list the whole syllabus as their topics, so the same rule applies.
+ */
+function topicTier(material: Material, q: Question): number {
+  if (q.topics?.some((t) => material.topics.includes(t))) return 0;
+  if (matchesTopics(q.topics, material.topics)) return 1;
+  return 2;
 }
 
 /** Rank pool indexes for one material. Lower sort key = picked first. */
 function rankFor(material: Material, pool: Question[], tiebreakSalt: string, penalty: (i: number) => number): number[] {
   const scored = pool.map((q, i) => ({
     i,
-    onTopic: isOnTopic(material, q) ? 0 : 1,
+    tier: topicTier(material, q),
     penalty: penalty(i),
     tie: hashString(`${material.id}|${tiebreakSalt}|${i}`),
   }));
-  scored.sort((a, b) => a.onTopic - b.onTopic || a.penalty - b.penalty || a.tie - b.tie);
+  scored.sort((a, b) => a.tier - b.tier || a.penalty - b.penalty || a.tie - b.tie);
   return scored.map((s) => s.i);
 }
 
@@ -167,32 +174,41 @@ function groupAllocation(material: Material, count: number): Map<string, number[
   return allocation;
 }
 
-function finalise(material: Material, pool: Question[], indexes: number[], attempt: number): Question[] {
-  const rng = makeRng(hashString(`${material.id}|order|${attempt}`));
+function finalise(material: Material, pool: Question[], indexes: number[], salt: string): Question[] {
+  const rng = makeRng(hashString(`${material.id}|order|${salt}`));
   return shuffle(rng, indexes).map((i) => {
     const { topics: _topics, ...q } = shuffleOptions(rng, pool[i]);
     return q;
   });
 }
 
+/** Number of questions in every quiz and exam. */
+export const QUIZ_LENGTH = 15;
+
 /**
- * The questions for a material.
- *
- * - `attempt` 0 (the default) is the material's fixed set: identical every time
- *   it is opened, on every device, as long as the content doesn't change.
- * - `attempt` N > 0 is an alternative set for "try a new question set": still
- *   on-topic first, but avoiding the questions of the fixed set where possible.
- *   Each N is itself stable, so a resumed retake keeps its questions.
+ * The questions for a material: a fixed set, identical every time it is
+ * opened, on every device, as long as the content doesn't change. Questions
+ * on the material's own topics always come first.
  */
-export function generateQuiz(material: Material, count: number, attempt = 0): Question[] {
+export function generateQuiz(material: Material, count: number = QUIZ_LENGTH): Question[] {
   const want = Math.max(1, Math.floor(count));
   const pool = questionPool(material);
   if (pool.length === 0) return [];
+  const picked = groupAllocation(material, want).get(material.id) ?? [];
+  return finalise(material, pool, picked, "quiz");
+}
 
-  const base = groupAllocation(material, want).get(material.id) ?? [];
-  if (attempt <= 0) return finalise(material, pool, base, 0);
-
-  const inBase = new Set(base);
-  const picked = rankFor(material, pool, `attempt-${attempt}`, (i) => (inBase.has(i) ? 1 : 0)).slice(0, want);
-  return finalise(material, pool, picked, attempt);
+/**
+ * Worked practice questions for a material's study notes: on the material's
+ * topics, but never one of the questions in its quiz, so the notes don't give
+ * the quiz answers away.
+ */
+export function practiceQuestions(material: Material, count: number): Question[] {
+  const pool = questionPool(material);
+  if (pool.length === 0) return [];
+  const inQuiz = new Set(groupAllocation(material, QUIZ_LENGTH).get(material.id) ?? []);
+  const picked = rankFor(material, pool, "practice", (i) => (inQuiz.has(i) ? 1 : 0))
+    .filter((i) => !inQuiz.has(i))
+    .slice(0, Math.max(0, Math.floor(count)));
+  return finalise(material, pool, picked, "practice");
 }

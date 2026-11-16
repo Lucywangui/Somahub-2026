@@ -1,6 +1,6 @@
 import type { Material } from "./materials";
 import { resolveGrade, type GradeBand } from "./grade";
-import { generateQuiz } from "./generators";
+import { practiceQuestions } from "./generators";
 import { factsForSubject } from "./generators/factIndex";
 import type { GeneratedNote, NoteBlock, NoteSource, NoteSubtopic } from "./notesTypes";
 
@@ -455,7 +455,7 @@ export async function getStudyNotes(material: Material): Promise<StudyNote> {
     ...topicContent(generatedNotes, material.subject, name, g.band, g.grade),
   }));
 
-  const practice = generateQuiz(material, 6, 20250830).map((q) => ({
+  const practice = practiceQuestions(material, 6).map((q) => ({
     q: q.text,
     a: q.options[q.correct],
   }));

@@ -236,4 +236,10 @@ export const FACTS: Fact[] = [
   { q: "Methali \"Usipoziba ufa utajenga ukuta\" hufunza:", a: "kushughulikia tatizo dogo kabla halijakua", wrong: ["kujenga nyumba kubwa", "kuepuka kazi ya ujenzi", "kununua vifaa vingi"], topics: ["Ufahamu na Muhtasari"], why: "Ufa mdogo usiporekebishwa husababisha ukuta wote kuanguka." },
   { q: "Methali \"Haba na haba hujaza kibaba\" inamaanisha:", a: "vitu vidogo vikikusanywa huleta wingi", wrong: ["haraka huleta hasara", "chakula ni muhimu", "mtu mmoja hawezi kufanya kazi"], topics: ["Ufahamu na Muhtasari"], why: "Kuweka kidogo kidogo hatimaye huzaa kitu kikubwa, kama akiba." },
   { q: "Kwa kawaida, wazo kuu la aya hupatikana katika:", a: "sentensi kuu ya aya", wrong: ["kichwa cha kitabu", "alama za uakifishaji", "jina la mwandishi"], topics: ["Ufahamu na Muhtasari"], why: "Sentensi kuu, mara nyingi ya kwanza, hubeba wazo linalofafanuliwa na aya nzima." },
+
+  // ── Nyongeza (round 2): Ushairi wa Kisasa ──
+  { q: "Mshairi anapokipa kitu kisicho na uhai sifa za binadamu, kwa mfano “Mti ulilia kwa uchungu”, anatumia:", a: "tashihisi", wrong: ["tashbihi", "sitiari", "chuku"], topics: ["Ushairi wa Kisasa"], why: "Tashihisi (uhuishi) ni kukipa kitu kisicho binadamu sifa za kibinadamu." },
+  { q: "Ulinganisho wa moja kwa moja bila kutumia “kama” au “mithili ya”, kwa mfano “Elimu ni taa”, huitwa:", a: "sitiari", wrong: ["tashbihi", "tashihisi", "tanakali sauti"], topics: ["Ushairi wa Kisasa"], why: "Sitiari hulinganisha vitu moja kwa moja bila viunganishi vya ulinganisho." },
+  { q: "Mshororo ambao maana yake haikamiliki hadi msomaji aendelee na mshororo unaofuata huitwa:", a: "mshata", wrong: ["kibwagizo", "kituo", "ukwapi"], topics: ["Ushairi wa Kisasa"], why: "Mshata ni mshororo usio na maana kamili; maana huendelea katika mshororo unaofuata." },
+  { q: "Kutia chumvi ili kusisitiza jambo, kwa mfano “Nililia bahari ya machozi”, huitwa:", a: "chuku", wrong: ["taswira", "inkisari", "tabdila"], topics: ["Ushairi wa Kisasa"], why: "Chuku hukuza jambo kupita uhalisia ili kulisisitiza." },
 ];

@@ -1,3 +1,4 @@
+import type { GradeBand } from "@/data/grade";
 import type { GenContext, Question, SubjectGenerator } from "./types";
 import { buildMCQ, numericMCQ, pick, randInt, shuffle } from "./helpers";
 
@@ -191,14 +192,61 @@ const BUILDERS_BY_GRADE: Record<number, Builder[]> = {
   12: [quadraticRoots, trigValue, differentiate, integrate, arithmeticSeq, logValue],
 };
 
+// Which catalogue topics (exact names from materials.ts) each builder tests, per
+// grade band. Untagged builders still feed exams but never pad a topical quiz.
+const BUILDER_TOPICS: Record<GradeBand, Map<Builder, string[]>> = {
+  lower: new Map<Builder, string[]>([
+    [addSmall, ["Addition"]],
+    [subSmall, ["Subtraction"]],
+    [wordSub, ["Subtraction"]],
+    [countBy, ["Patterns & Sequences", "Numbers 1–100"]],
+    [shapeSides, ["Shapes & Geometry"]],
+    [moneyLower, ["Money (KSh)"]],
+    [timeLower, ["Time & Calendar"]],
+  ]),
+  upper: new Map<Builder, string[]>([
+    [addSmall, ["Whole Numbers & Place Value"]],
+    [mult, ["Whole Numbers & Place Value"]],
+    [divide, ["Whole Numbers & Place Value"]],
+    [equivFraction, ["Fractions & Decimals"]],
+    [decimalFraction, ["Fractions & Decimals"]],
+    [percentOf, ["Percentages & Ratios"]],
+    [perimeter, ["Area & Perimeter"]],
+    [area, ["Area & Perimeter"]],
+    [meanOf, ["Data & Statistics"]],
+  ]),
+  junior: new Map<Builder, string[]>([
+    [integerOps, ["Number Theory & Operations"]],
+    [indices, ["Number Theory & Operations"]],
+    [solveLinear, ["Algebra & Linear Equations"]],
+    [ratioShare, ["Financial Mathematics"]],
+    [meanOf, ["Statistics & Probability"]],
+    [pythagoras, ["Geometry & Triangles"]],
+    [arithmeticSeq, ["Sequences, Series & Binomial"]],
+  ]),
+  senior: new Map<Builder, string[]>([
+    [quadraticRoots, ["Algebra & Functions"]],
+    [solveLinear, ["Algebra & Functions"]],
+    [logValue, ["Algebra & Functions"]],
+    [indices, ["Algebra & Surds"]],
+    [arithmeticSeq, ["Sequences & Series", "Sequences, Series & Binomial"]],
+    [trigValue, ["Trigonometry", "Trigonometry & Identities"]],
+    [differentiate, ["Differentiation (Calculus)", "Differentiation"]],
+    [integrate, ["Integration (Calculus)", "Integration & Applications"]],
+  ]),
+};
+
 export const mathematicsGenerator: SubjectGenerator = (ctx) => {
   const builders = BUILDERS_BY_GRADE[ctx.grade] ?? BUILDERS_BY_GRADE[6];
+  const tags = BUILDER_TOPICS[ctx.band];
   const out: Question[] = [];
   // Draw generously so the engine can dedupe down to a full unique quiz.
   for (let attempt = 0; attempt < 220 && out.length < 60; attempt++) {
     const b = builders[attempt % builders.length];
     const q = b(ctx);
-    if (q) out.push(q);
+    if (!q) continue;
+    const topics = tags.get(b);
+    out.push(topics ? { ...q, topics } : q);
   }
   return shuffle(ctx.rng, out);
 };

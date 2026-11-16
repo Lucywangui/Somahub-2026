@@ -72,6 +72,7 @@ def create_coins_blueprint(
     now_string,
     calculate_wallet_balance,
     is_sandbox,
+    reconcile_payments=None,
 ):
     bp = Blueprint("coins", __name__)
 
@@ -480,10 +481,20 @@ def create_coins_blueprint(
         methods=["GET"],
     )
     def get_account(soma_hub_code):
+        code = soma_hub_code.strip().upper()
+
+        # Apply any of this student's payments whose confirmation was
+        # missed (closed app, lost webhook) before reporting the account,
+        # so paid money and unlocks show up when the app syncs.
+        if reconcile_payments:
+            try:
+                reconcile_payments(code)
+            except Exception as exc:
+                print("PAYMENT RECONCILIATION ERROR:", code, exc)
+
         conn = get_db()
 
         try:
-            code = soma_hub_code.strip().upper()
 
             if not find_student(
                 conn,

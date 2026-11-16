@@ -35,7 +35,7 @@ from coins import (
     is_valid_purpose,
 )
 
-from intasend import APIService
+from intasend_client import IntaSendClient, IntaSendError
 
 
 # ============================================================
@@ -86,8 +86,43 @@ app = Flask(__name__)
 # RATE LIMITING
 # ============================================================
 
+def client_ip():
+    """
+    The learner's real IP address.
+
+    Render (and Cloudflare in front of it) proxy every request, so
+    request.remote_addr is the proxy's address — keying limits on it made
+    every limit global, shared by all learners at once. Use the address the
+    proxies forward instead.
+    """
+    for header in ("CF-Connecting-IP", "True-Client-IP"):
+        value = (request.headers.get(header) or "").strip()
+        if value:
+            return value
+
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+
+    return get_remote_address()
+
+
+def payment_phone_key():
+    """Rate-limit key for starting payments: one bucket per M-Pesa number."""
+    data = request.get_json(silent=True) or {}
+    phone = normalize_kenyan_phone(
+        data.get("phone_number") or data.get("phoneNumber") or data.get("phone")
+    )
+    return f"phone:{phone or client_ip()}"
+
+
+def payment_session_key():
+    """Rate-limit key for status checks: one bucket per payment session."""
+    return f"session:{(request.view_args or {}).get('session_id', '')}"
+
+
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=client_ip,
     app=app,
     default_limits=["100 per minute"],
     storage_uri="memory://",
@@ -457,8 +492,10 @@ def validate_payment_purpose(purpose):
 # ============================================================
 
 def get_intasend_service():
-    return APIService(
-        token=INTASEND_SECRET_KEY or None,
+    # Our own client: same IntaSend endpoints as intasend-python, but every
+    # call has a timeout so a slow provider can't hang a worker.
+    return IntaSendClient(
+        secret_key=INTASEND_SECRET_KEY or None,
         publishable_key=INTASEND_PUBLISHABLE_KEY or None,
         test=INTASEND_TEST_ENVIRONMENT,
     )
@@ -535,6 +572,54 @@ def extract_intasend_invoice(response):
     return {}
 
 
+def _provider_field(invoice, response, name):
+    for source in (invoice, response):
+        if isinstance(source, dict) and source.get(name) is not None:
+            return source.get(name)
+    return None
+
+
+def provider_paid_amount(invoice, response):
+    """What the customer actually paid (IntaSend's invoice value)."""
+    value = _provider_field(invoice, response, "value")
+    return value if value is not None else _provider_field(invoice, response, "amount")
+
+
+def provider_amount_matches(invoice, response, expected_amount):
+    """
+    True when IntaSend collected the amount we asked for.
+
+    Depending on the IntaSend account's tariff setting, transaction charges
+    are either added on top of the requested amount (customer pays: value =
+    amount + charges, net_amount = amount) or taken out of it (business pays:
+    value = amount). Comparing only `value` refused every payment on a
+    customer-pays account, so both conventions are accepted. This is safe:
+    the invoice is looked up by our own invoice ID, created by our server
+    for this exact amount.
+    """
+    expected = normalize_amount(expected_amount)
+    if expected is None:
+        return False
+
+    candidates = [
+        _provider_field(invoice, response, name)
+        for name in ("value", "amount", "net_amount")
+    ]
+
+    value = _provider_field(invoice, response, "value")
+    charges = _provider_field(invoice, response, "charges")
+    if value is not None and charges is not None:
+        try:
+            candidates.append(Decimal(str(value)) - Decimal(str(charges)))
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+
+    return any(
+        candidate is not None and amounts_match(candidate, expected)
+        for candidate in candidates
+    )
+
+
 def verify_intasend_invoice_for_session(payment_session, response):
     """
     Verify IntaSend's authoritative status response against the
@@ -577,21 +662,10 @@ def verify_intasend_invoice_for_session(payment_session, response):
     if not hmac.compare_digest(returned_api_ref, expected_api_ref):
         return False, "Payment reference mismatch.", state
 
-    provider_amount = (
-        invoice.get("value")
-        if invoice.get("value") is not None
-        else invoice.get("amount")
-        if invoice.get("amount") is not None
-        else response.get("value")
-        if response.get("value") is not None
-        else response.get("amount")
-    )
-    expected_amount = payment_session.get("amount")
-
-    if provider_amount is None or expected_amount is None:
+    if provider_paid_amount(invoice, response) is None or payment_session.get("amount") is None:
         return False, "Payment amount is missing.", state
 
-    if not amounts_match(provider_amount, expected_amount):
+    if not provider_amount_matches(invoice, response, payment_session.get("amount")):
         return False, "Payment amount mismatch.", state
 
     currency = str(
@@ -924,6 +998,164 @@ def process_completed_payment(
 
 
 # ============================================================
+# AUTOMATIC REFUNDS
+# ============================================================
+
+# A completed M-Pesa payment that fails one of these checks can't be safely
+# matched to what the student was asked to pay, so the money goes back.
+REFUNDABLE_VERIFICATION_FAILURES = {
+    "Invoice ID mismatch.",
+    "Payment reference mismatch.",
+    "Payment amount mismatch.",
+    "Payment currency mismatch.",
+}
+
+REFUND_REASON = "Payment could not be applied"
+
+
+def _update_payment_session(payment_session_id, assignments, params):
+    conn = get_db()
+    try:
+        conn.execute(
+            f"UPDATE payment_sessions SET {assignments} WHERE id = %s",
+            (*params, payment_session_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def refund_unapplied_payment(payment_session, paid_amount, why):
+    """
+    Ask IntaSend to send a completed payment back to the payer's M-Pesa.
+
+    Used only when money arrived but can't be safely applied (wrong amount,
+    reference or currency, or no student to credit). Idempotent: a session is
+    refunded at most once, and never after it has credited a wallet.
+    """
+    payment_session_id = payment_session["id"]
+    invoice_id = str(payment_session.get("checkout_request_id") or "").strip()
+    amount = normalize_amount(paid_amount)
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT status, refund_status, refund_amount
+            FROM payment_sessions
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (payment_session_id,),
+        ).fetchone()
+
+        if not row:
+            conn.rollback()
+            return {"success": False, "error": "Payment session not found."}
+
+        status = str(row.get("status") or "").upper()
+
+        if status == "COMPLETED":
+            # Already credited to the wallet — never refund on top of that.
+            conn.commit()
+            return {"success": True, "state": "COMPLETE"}
+
+        if row.get("refund_status"):
+            conn.commit()
+            return {
+                "success": True,
+                "state": "REFUND_REQUESTED" if row["refund_status"] != "FAILED" else "REVIEW",
+                "refund_amount": float(row["refund_amount"]) if row.get("refund_amount") is not None else None,
+            }
+
+        if amount is None or not invoice_id:
+            conn.execute(
+                """
+                UPDATE payment_sessions
+                SET status = 'NEEDS_REVIEW', review_note = %s
+                WHERE id = %s
+                """,
+                (f"{why} (no refundable amount/invoice)", payment_session_id),
+            )
+            conn.commit()
+            app.logger.error(
+                "Payment session %s needs manual review: %s",
+                payment_session_id,
+                why,
+            )
+            return {"success": True, "state": "REVIEW"}
+
+        conn.execute(
+            """
+            UPDATE payment_sessions
+            SET status = 'REFUND_REQUESTED',
+                refund_status = 'REQUESTING',
+                refund_amount = %s,
+                review_note = %s
+            WHERE id = %s
+            """,
+            (amount, why, payment_session_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    try:
+        response = get_intasend_service().request_refund(
+            invoice_id,
+            float(amount),
+            REFUND_REASON,
+            why,
+        )
+    except IntaSendError as exc:
+        app.logger.error(
+            "Automatic refund failed for payment session %s: %s %s",
+            payment_session_id,
+            exc,
+            getattr(exc, "body", None),
+        )
+        _update_payment_session(
+            payment_session_id,
+            "status = 'NEEDS_REVIEW', refund_status = 'FAILED'",
+            (),
+        )
+        return {"success": True, "state": "REVIEW"}
+
+    reference = None
+    if isinstance(response, dict):
+        reference = (
+            response.get("chargeback_id")
+            or response.get("id")
+            or response.get("reference")
+        )
+
+    _update_payment_session(
+        payment_session_id,
+        "refund_status = 'REQUESTED', refund_reference = %s",
+        (str(reference) if reference is not None else None,),
+    )
+
+    app.logger.warning(
+        "Requested automatic refund of KSh %s for payment session %s: %s",
+        amount,
+        payment_session_id,
+        why,
+    )
+
+    return {
+        "success": True,
+        "state": "REFUND_REQUESTED",
+        "refund_amount": float(amount),
+    }
+
+
+# ============================================================
 # SYNC PAYMENT STATUS FROM INTASEND
 # ============================================================
 
@@ -951,8 +1183,13 @@ def sync_payment_from_intasend(payment_session):
         }
 
     try:
+        _update_payment_session(
+            payment_session["id"],
+            "last_checked_at = %s",
+            (now_string(),),
+        )
         service = get_intasend_service()
-        response = service.collect.status(invoice_id=invoice_id)
+        response = service.payment_status(invoice_id)
     except Exception:
         app.logger.exception(
             "Could not retrieve IntaSend status for payment session %s",
@@ -989,6 +1226,13 @@ def sync_payment_from_intasend(payment_session):
                 payment_session.get("id"),
                 reason,
             )
+            if reason in REFUNDABLE_VERIFICATION_FAILURES:
+                return refund_unapplied_payment(
+                    payment_session,
+                    provider_paid_amount(invoice, response),
+                    reason,
+                )
+            # Incomplete provider data: leave it open so a later check retries.
             return {
                 "success": False,
                 "error": "Payment could not be verified.",
@@ -998,10 +1242,23 @@ def sync_payment_from_intasend(payment_session):
             payment_session["id"],
             invoice_id=invoice_id,
             verified_payment=True,
-                    )
+        )
         if result.get("success"):
             result["state"] = "COMPLETE"
-        return result
+            return result
+
+        # The money is verified but can't be credited (e.g. the student
+        # record is gone): send it back rather than keep it.
+        app.logger.error(
+            "Verified payment session %s could not be credited: %s",
+            payment_session.get("id"),
+            result.get("error"),
+        )
+        return refund_unapplied_payment(
+            payment_session,
+            provider_paid_amount(invoice, response),
+            result.get("error") or "Payment could not be credited.",
+        )
 
     if state in {"FAILED", "CANCELED", "CANCELLED"}:
         conn = get_db()
@@ -1856,7 +2113,8 @@ def admin_top_students():
 @app.post(
     "/api/intasend/payment-session"
 )
-@limiter.limit("3 per minute")
+@limiter.limit("3 per minute", key_func=payment_phone_key)
+@limiter.limit("20 per minute")
 def create_payment_session():
     data = request.get_json(
         silent=True
@@ -2043,7 +2301,7 @@ def create_payment_session():
     try:
         service = get_intasend_service()
 
-        response = service.collect.mpesa_stk_push(
+        response = service.mpesa_stk_push(
             phone_number=phone,
             amount=float(amount),
             narrative=f"SOMA HUB {purpose}",
@@ -2145,6 +2403,7 @@ def create_payment_session():
 # ============================================================
 
 @app.post("/api/intasend/webhook")
+@limiter.exempt
 def intasend_webhook():
     payload = request.get_json(
         silent=True
@@ -2348,32 +2607,8 @@ def intasend_webhook():
                 ),
             }), 403
 
-        webhook_amount = (
-            payload.get("value")
-            if payload.get("value") is not None
-            else payload.get("amount")
-        )
-
-        if webhook_amount is not None:
-            if not amounts_match(
-                webhook_amount,
-                payment_session.get("amount"),
-            ):
-                conn.rollback()
-
-                app.logger.warning(
-                    "Rejected webhook: amount mismatch "
-                    "for payment session %s",
-                    payment_session["id"],
-                )
-
-                return jsonify({
-                    "success": False,
-                    "error": (
-                        "Payment amount mismatch."
-                    ),
-                }), 403
-
+        # The webhook payload is never trusted for amounts: the authoritative
+        # status check below verifies them (and refunds a mismatch).
         conn.rollback()
 
     finally:
@@ -2385,7 +2620,16 @@ def intasend_webhook():
         if not result.get("success"):
             return jsonify(result), 409
 
-        if str(result.get("state") or "").upper() != "COMPLETE":
+        result_state = str(result.get("state") or "").upper()
+
+        if result_state in {"REFUND_REQUESTED", "REVIEW"}:
+            return jsonify({
+                "success": True,
+                "processed": True,
+                "state": result_state,
+            })
+
+        if result_state != "COMPLETE":
             return jsonify({
                 "success": True,
                 "processed": False,
@@ -2474,16 +2718,68 @@ def intasend_webhook():
 @app.get(
     "/api/intasend/payment-status/<session_id>"
 )
-@limiter.limit("30 per minute")
+@limiter.limit("40 per minute", key_func=payment_session_key)
 def payment_status(session_id):
-    session_id = str(
-        session_id
-    ).strip()
+    session_id = str(session_id).strip()
 
-    conn = get_db()
+    payment_session = load_payment_session(session_id)
 
+    if not payment_session:
+        return jsonify({
+            "success": False,
+            "error": "Payment session not found.",
+        }), 404
+
+    local_status = str(payment_session.get("status") or "").upper()
+
+    if local_status == "COMPLETED":
+        return completed_payment_response(payment_session)
+
+    if local_status in {"FAILED", "REFUND_REQUESTED", "NEEDS_REVIEW"}:
+        return closed_payment_response(payment_session)
+
+    # PENDING or EXPIRED: ask IntaSend. An "expired" session may still have
+    # been paid (the webhook can be missed), so it is always re-checked
+    # before being reported as expired.
     try:
-        payment_session = conn.execute(
+        result = sync_payment_from_intasend(payment_session)
+    except Exception:
+        app.logger.exception("Failed to check IntaSend payment status.")
+        result = {"success": False}
+
+    state = str(result.get("state") or "").upper()
+
+    if result.get("success") and state == "COMPLETE":
+        return completed_payment_response(
+            load_payment_session(session_id) or payment_session
+        )
+
+    if result.get("success") and state in {"FAILED", "REFUND_REQUESTED", "REVIEW"}:
+        return closed_payment_response(
+            load_payment_session(session_id) or payment_session
+        )
+
+    expires_at = parse_database_datetime(payment_session.get("expires_at"))
+    if expires_at and utc_now() > expires_at:
+        _mark_expired(payment_session["id"])
+        return payment_status_payload(payment_session, "expired")
+
+    if not result.get("success"):
+        # Couldn't reach/verify with IntaSend this time; the app keeps
+        # polling and the session stays open for reconciliation.
+        app.logger.warning(
+            "Payment status check inconclusive for session %s: %s",
+            payment_session.get("id"),
+            result.get("error"),
+        )
+
+    return payment_status_payload(payment_session, "pending")
+
+
+def load_payment_session(session_id):
+    conn = get_db()
+    try:
+        row = conn.execute(
             """
             SELECT *
             FROM payment_sessions
@@ -2492,247 +2788,186 @@ def payment_status(session_id):
             """,
             (session_id,),
         ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
 
+
+def _mark_expired(payment_session_id):
+    _update_payment_session(
+        payment_session_id,
+        "status = 'EXPIRED'",
+        (),
+    )
+
+
+def payment_status_payload(payment_session, status, **extra):
+    balance = calculate_wallet_balance(payment_session["soma_hub_code"])
+    return jsonify({
+        "success": True,
+        "session_id": payment_session["session_id"],
+        "sessionId": payment_session["session_id"],
+        "status": status,
+        "wallet_balance": balance,
+        "balance": balance,
+        "purpose_result": extra.pop("purpose_result", None),
+        **extra,
+    })
+
+
+def closed_payment_response(payment_session):
+    status = str(payment_session.get("status") or "").upper()
+
+    if status == "REFUND_REQUESTED":
+        refund_amount = payment_session.get("refund_amount")
+        return payment_status_payload(
+            payment_session,
+            "refunded",
+            refund_amount=float(refund_amount) if refund_amount is not None else None,
+        )
+
+    if status == "NEEDS_REVIEW":
+        return payment_status_payload(payment_session, "review")
+
+    return payment_status_payload(payment_session, "failed")
+
+
+def completed_payment_response(payment_session):
+    # Idempotent: coins.py records the purpose result once per session.
+    try:
+        fulfil_result = coins_bp.fulfil_payment_purpose(payment_session["session_id"])
+    except Exception:
+        app.logger.exception(
+            "Payment completed but purpose fulfilment failed for session %s",
+            payment_session["session_id"],
+        )
+        return jsonify({
+            "success": False,
+            "paymentCredited": True,
+            "error": (
+                "Payment was completed, but the requested material "
+                "could not be confirmed. Your money is in your wallet."
+            ),
+        }), 500
+
+    return payment_status_payload(
+        payment_session,
+        "completed",
+        purpose_result=fulfil_result,
+        fulfilment=fulfil_result,
+    )
+
+
+# ============================================================
+# RECONCILIATION — catch payments whose confirmation was missed
+# ============================================================
+
+# Re-check open sessions this long after they were created...
+RECONCILE_MAX_AGE = timedelta(days=3)
+# ...but ask IntaSend about the same session at most this often.
+RECONCILE_RECHECK_AFTER = timedelta(minutes=2)
+
+RECONCILE_TOKEN = os.getenv("RECONCILE_TOKEN", "")
+
+
+def reconcile_open_payments(soma_hub_code=None, limit=20):
+    """
+    Finish every recent payment that IntaSend completed but we haven't
+    applied: credits the wallet, unlocks the material, or refunds what can't
+    be matched. Safe to run repeatedly — every step is idempotent.
+    """
+    now = utc_now()
+    params = [
+        (now - RECONCILE_MAX_AGE).isoformat(),
+        (now - RECONCILE_RECHECK_AFTER).isoformat(),
+    ]
+    student_filter = ""
+    if soma_hub_code:
+        student_filter = "AND UPPER(soma_hub_code) = UPPER(%s)"
+        params.append(str(soma_hub_code).strip())
+    params.append(int(limit))
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM payment_sessions
+            WHERE checkout_request_id IS NOT NULL
+              AND created_at >= %s
+              AND (
+                    (
+                      status IN ('PENDING', 'EXPIRED')
+                      AND (last_checked_at IS NULL OR last_checked_at < %s)
+                    )
+                    OR (status = 'COMPLETED' AND purpose_result IS NULL)
+                  )
+              {student_filter}
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            tuple(params),
+        ).fetchall()
     finally:
         conn.close()
 
-    if not payment_session:
+    summary = {"checked": 0, "completed": 0, "refunded": 0, "review": 0, "failed": 0, "errors": 0}
+
+    for row in rows:
+        payment_session = dict(row)
+        summary["checked"] += 1
+        try:
+            if str(payment_session.get("status") or "").upper() == "COMPLETED":
+                coins_bp.fulfil_payment_purpose(payment_session["session_id"])
+                summary["completed"] += 1
+                continue
+
+            result = sync_payment_from_intasend(payment_session)
+            state = str(result.get("state") or "").upper()
+
+            if not result.get("success"):
+                summary["errors"] += 1
+            elif state == "COMPLETE":
+                coins_bp.fulfil_payment_purpose(payment_session["session_id"])
+                summary["completed"] += 1
+            elif state == "REFUND_REQUESTED":
+                summary["refunded"] += 1
+            elif state == "REVIEW":
+                summary["review"] += 1
+            elif state == "FAILED":
+                summary["failed"] += 1
+        except Exception:
+            summary["errors"] += 1
+            app.logger.exception(
+                "Reconciliation failed for payment session %s",
+                payment_session.get("id"),
+            )
+
+    return summary
+
+
+@app.route(
+    "/api/internal/reconcile-payments",
+    methods=["GET", "POST"],
+)
+@limiter.exempt
+def reconcile_payments_endpoint():
+    """
+    For a scheduler (e.g. cron-job.org every 10 minutes) with header
+    X-Reconcile-Token: <RECONCILE_TOKEN>. Also keeps the Render
+    instance awake so learners don't wait for a cold start.
+    """
+    if not RECONCILE_TOKEN:
         return jsonify({
             "success": False,
-            "error": "Payment session not found.",
-        }), 404
+            "error": "RECONCILE_TOKEN is not configured.",
+        }), 503
 
-    payment_session = dict(
-        payment_session
-    )
+    supplied = request.headers.get("X-Reconcile-Token") or ""
+    if not hmac.compare_digest(supplied, RECONCILE_TOKEN):
+        return jsonify({"success": False, "error": "Forbidden."}), 403
 
-    if (
-        str(
-            payment_session.get("status") or ""
-        ).upper()
-        == "PENDING"
-    ):
-        expires_at = parse_database_datetime(
-            payment_session.get("expires_at")
-        )
-
-        if (
-            expires_at
-            and utc_now() > expires_at
-        ):
-            conn = get_db()
-
-            try:
-                conn.execute(
-                    """
-                    UPDATE payment_sessions
-                    SET status = 'EXPIRED'
-                    WHERE id = %s
-                      AND status = 'PENDING'
-                    """,
-                    (payment_session["id"],),
-                )
-
-                conn.commit()
-
-            finally:
-                conn.close()
-
-            payment_session["status"] = "EXPIRED"
-
-    local_status = str(
-        payment_session.get("status") or ""
-    ).upper()
-
-    if local_status in {
-        "FAILED",
-        "EXPIRED",
-    }:
-        balance = calculate_wallet_balance(
-            payment_session["soma_hub_code"]
-        )
-
-        frontend_status = (
-            "failed"
-            if local_status == "FAILED"
-            else "expired"
-        )
-
-        return jsonify({
-            "success": True,
-            "session_id": session_id,
-            "status": frontend_status,
-            "wallet_balance": balance,
-            "purpose_result": None,
-            "sessionId": session_id,
-            "balance": balance,
-        })
-
-    # ========================================================
-    # IMPORTANT FIX:
-    #
-    # A webhook can complete the payment before the frontend
-    # polls payment-status.
-    #
-    # In that case the payment session is already COMPLETED.
-    # We MUST still run the existing idempotent fulfilment
-    # function so the frontend receives the actual purpose
-    # result instead of purpose_result: null.
-    #
-    # This does NOT double-charge the wallet because
-    # coins.py already protects the fulfilment operation.
-    # ========================================================
-
-    if local_status == "COMPLETED":
-        try:
-            fulfil_result = (
-                coins_bp.fulfil_payment_purpose(
-                    payment_session["session_id"]
-                )
-            )
-
-        except Exception:
-            app.logger.exception(
-                "Payment already completed but "
-                "purpose fulfilment failed for session %s",
-                payment_session["session_id"],
-            )
-
-            return jsonify({
-                "success": False,
-                "paymentCredited": True,
-                "error": (
-                    "Payment was completed, but the "
-                    "requested material could not be "
-                    "confirmed."
-                ),
-            }), 500
-
-        balance = calculate_wallet_balance(
-            payment_session["soma_hub_code"]
-        )
-
-        return jsonify({
-            "success": True,
-            "session_id": session_id,
-            "status": "completed",
-            "wallet_balance": balance,
-            "purpose_result": fulfil_result,
-            "sessionId": session_id,
-            "balance": balance,
-            "fulfilment": fulfil_result,
-        })
-
-    try:
-        result = sync_payment_from_intasend(
-            payment_session
-        )
-
-    except Exception:
-        app.logger.exception(
-            "Failed to check IntaSend payment status."
-        )
-
-        return jsonify({
-            "success": False,
-            "error": (
-                "Unable to check payment status."
-            ),
-        }), 502
-
-    if not result.get("success"):
-        return jsonify(result), 502
-
-    if result.get("state") == "COMPLETE":
-        conn = get_db()
-
-        try:
-            latest_session = conn.execute(
-                """
-                SELECT *
-                FROM payment_sessions
-                WHERE id = %s
-                LIMIT 1
-                """,
-                (payment_session["id"],),
-            ).fetchone()
-
-        finally:
-            conn.close()
-
-        latest_session = dict(
-            latest_session
-            or payment_session
-        )
-
-        try:
-            fulfil_result = (
-                coins_bp.fulfil_payment_purpose(
-                    latest_session["session_id"]
-                )
-            )
-
-        except Exception:
-            app.logger.exception(
-                "Payment completed but fulfilment "
-                "failed for session %s",
-                latest_session["session_id"],
-            )
-
-            return jsonify({
-                "success": False,
-                "paymentCredited": True,
-                "error": (
-                    "Payment credited but fulfilment "
-                    "failed."
-                ),
-            }), 500
-
-        balance = calculate_wallet_balance(
-            latest_session["soma_hub_code"]
-        )
-
-        return jsonify({
-            "success": True,
-            "session_id": session_id,
-            "status": "completed",
-            "wallet_balance": balance,
-            "purpose_result": fulfil_result,
-            "sessionId": session_id,
-            "balance": balance,
-            "fulfilment": fulfil_result,
-        })
-
-    if str(
-        result.get("state") or ""
-    ).upper() == "FAILED":
-        balance = calculate_wallet_balance(
-            payment_session["soma_hub_code"]
-        )
-
-        return jsonify({
-            "success": True,
-            "session_id": session_id,
-            "status": "failed",
-            "wallet_balance": balance,
-            "purpose_result": None,
-            "sessionId": session_id,
-            "balance": balance,
-        })
-
-    balance = calculate_wallet_balance(
-        payment_session["soma_hub_code"]
-    )
-
-    return jsonify({
-        "success": True,
-        "session_id": session_id,
-        "status": "pending",
-        "wallet_balance": balance,
-        "purpose_result": None,
-        "sessionId": session_id,
-        "balance": balance,
-    })
+    return jsonify({"success": True, **reconcile_open_payments(limit=50)})
 
 
 # ============================================================
@@ -2853,6 +3088,7 @@ coins_bp = create_coins_blueprint(
     now_string,
     calculate_wallet_balance,
     is_sandbox,
+    reconcile_payments=lambda code: reconcile_open_payments(code, limit=5),
 )
 
 app.register_blueprint(

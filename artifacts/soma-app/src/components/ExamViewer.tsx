@@ -42,8 +42,6 @@ import { TopicNotesOverlay } from "./TopicNotesOverlay";
 interface Props {
   material: Material;
   onClose: () => void;
-  /** Switch this material to a different question set and restart. */
-  onNewSet?: () => void;
 }
 
 const TOTAL_QUESTIONS = 15;
@@ -64,7 +62,6 @@ function fmtClock(s: number): string {
 export function ExamViewer({
   material,
   onClose,
-  onNewSet,
 }: Props) {
   const addQuizResult = useSomaStore(
     (s) => s.addQuizResult
@@ -114,10 +111,7 @@ export function ExamViewer({
 
       return getQuestionsForMaterial(
         material,
-        TOTAL_QUESTIONS,
-        useSomaStore.getState().quizAttempts[
-        material.id
-      ] ?? 0
+        TOTAL_QUESTIONS
       );
     });
 
@@ -1266,21 +1260,6 @@ export function ExamViewer({
               >
                 Review Answers
               </Button>
-
-              {onNewSet && (
-                <Button
-                  onClick={onNewSet}
-                  variant="outline"
-                  className="
-                    flex-1
-                    rounded-none
-                    border-black
-                    hover:bg-gray-100
-                  "
-                >
-                  New Question Set
-                </Button>
-              )}
 
               <Button
                 onClick={onClose}

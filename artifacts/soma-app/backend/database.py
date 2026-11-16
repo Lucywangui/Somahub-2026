@@ -218,6 +218,24 @@ def init_database():
             """
         )
 
+        # Reconciliation and automatic refunds.
+        #   last_checked_at  last time IntaSend was asked about this session
+        #   refund_status    REQUESTING | REQUESTED | FAILED
+        #   refund_reference IntaSend chargeback/refund id
+        #   refund_amount    KSh asked back for the payer
+        #   review_note      why the payment could not be applied
+        for column_sql in (
+            "last_checked_at TEXT",
+            "refund_status TEXT",
+            "refund_reference TEXT",
+            "refund_amount NUMERIC(12, 2)",
+            "review_note TEXT",
+        ):
+            connection.execute(
+                "ALTER TABLE payment_sessions "
+                f"ADD COLUMN IF NOT EXISTS {column_sql}"
+            )
+
         # =========================================================
         # LEGACY MPESA TRANSACTIONS
         #

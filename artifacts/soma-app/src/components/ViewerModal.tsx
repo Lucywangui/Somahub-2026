@@ -32,10 +32,6 @@ export function ViewerModal({ materialId, onClose }: Props) {
     (s) => s.clearQuizProgress
   );
 
-  const startNewQuestionSet = useSomaStore(
-    (s) => s.startNewQuestionSet
-  );
-
   const [view, setView] = useState<View>("choose");
   const [attemptKey, setAttemptKey] = useState(0);
 
@@ -56,12 +52,6 @@ export function ViewerModal({ materialId, onClose }: Props) {
 
   const startFresh = () => {
     clearQuizProgress(materialId);
-    setAttemptKey((key) => key + 1);
-    setView("quiz");
-  };
-
-  const newQuestionSet = () => {
-    startNewQuestionSet(materialId);
     setAttemptKey((key) => key + 1);
     setView("quiz");
   };
@@ -297,14 +287,12 @@ export function ViewerModal({ materialId, onClose }: Props) {
                   key={attemptKey}
                   material={material}
                   onClose={onClose}
-                  onNewSet={newQuestionSet}
                 />
               ) : (
                 <TopicalViewer
                   key={attemptKey}
                   material={material}
                   onClose={onClose}
-                  onNewSet={newQuestionSet}
                 />
               )}
             </div>

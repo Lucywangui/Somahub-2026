@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError } from "@/lib/api";
+import { ApiError, warmUpBackend } from "@/lib/api";
 import {
   MAX_TOPUP_AMOUNT,
   MIN_TOPUP_AMOUNT,
@@ -40,7 +40,7 @@ type Step =
       amount: number;
     }
   | { name: "failed"; message: string }
-  | { name: "timeout" };
+  | { name: "timeout"; sessionId: string; amount: number };
 
 const QUICK_AMOUNTS = [20, 50, 100, 200];
 
@@ -50,7 +50,9 @@ const FAILURE_MESSAGES = {
   failed:
     "The payment was cancelled or didn't go through. No money was taken.",
   expired:
-    "The payment request expired before it was completed.",
+    "The payment request expired before it was completed. If money was taken, it will be added to your wallet automatically the next time you open SOMA HUB.",
+  review:
+    "We received your payment but couldn't apply it automatically. It has been flagged for our team, who will add it to your wallet or refund it. Please keep your M-Pesa message.",
 };
 
 export const formatKsh = (amount: number) =>
@@ -103,12 +105,13 @@ export function MpesaPayFlow({
 
   const pollAbort = useRef<AbortController | null>(null);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Wake the server while the learner types their number.
+    warmUpBackend();
+    return () => {
       pollAbort.current?.abort();
-    },
-    [],
-  );
+    };
+  }, []);
 
   const waitForPayment = async (
     sessionId: string,
@@ -134,7 +137,15 @@ export function MpesaPayFlow({
         purposeResult: outcome.purposeResult,
       });
     } else if (outcome.status === "timeout") {
-      setStep({ name: "timeout" });
+      setStep({ name: "timeout", sessionId, amount: paidAmount });
+    } else if (outcome.status === "refunded") {
+      const refund = outcome.refundAmount ?? paidAmount;
+      setStep({
+        name: "failed",
+        message: `We received your payment but couldn't match it to this purchase, so ${formatKsh(
+          refund,
+        )} is being refunded to your M-Pesa. Refunds can take a few days to arrive.`,
+      });
     } else {
       setStep({
         name: "failed",
@@ -430,16 +441,36 @@ export function MpesaPayFlow({
 
       <p className="text-sm text-muted-foreground">
         We haven’t received the payment confirmation yet.
-        If you completed the payment, your SOMA Points
-        wallet will update once IntaSend confirms it.
+        If you entered your PIN and money was taken, it will
+        be added automatically — tap “Check again”, or it will
+        show the next time you open SOMA HUB.
       </p>
 
-      <Button
-        className="w-full rounded-xl"
-        onClick={onClose}
-      >
-        Done
-      </Button>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          className="flex-1 rounded-xl"
+          onClick={onClose}
+        >
+          Close
+        </Button>
+
+        {step.name === "timeout" && (
+          <Button
+            className="flex-1 rounded-xl"
+            onClick={() => {
+              setStep({
+                name: "waiting",
+                sessionId: step.sessionId,
+                amount: step.amount,
+              });
+              void waitForPayment(step.sessionId, step.amount);
+            }}
+          >
+            Check again
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

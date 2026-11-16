@@ -38,6 +38,10 @@ import { FACTS as kiswahili_lower } from "./kiswahili/lower";
 import { FACTS as kiswahili_senior } from "./kiswahili/senior";
 import { FACTS as kiswahili_upper } from "./kiswahili/upper";
 import { FACTS as literature_senior } from "./literature/senior";
+import { FACTS as mathematics_junior } from "./mathematics/junior";
+import { FACTS as mathematics_lower } from "./mathematics/lower";
+import { FACTS as mathematics_senior } from "./mathematics/senior";
+import { FACTS as mathematics_upper } from "./mathematics/upper";
 import { FACTS as physics_junior } from "./physics/junior";
 import { FACTS as physics_senior } from "./physics/senior";
 import { FACTS as pre_technical_studies_junior } from "./pre-technical-studies/junior";
@@ -71,6 +75,7 @@ export const QUESTION_BANKS: Record<string, Partial<Record<GradeBand, Fact[]>>> 
   "Integrated Science": { junior: integrated_science_junior },
   "Kiswahili": { lower: kiswahili_lower, upper: kiswahili_upper, junior: kiswahili_junior, senior: kiswahili_senior },
   "Literature": { senior: literature_senior },
+  "Mathematics": { lower: mathematics_lower, upper: mathematics_upper, junior: mathematics_junior, senior: mathematics_senior },
   "Physics": { senior: physics_senior, junior: physics_junior },
   "Pre-Technical Studies": { junior: pre_technical_studies_junior },
   "Social Studies": { upper: social_studies_upper, junior: social_studies_junior },
